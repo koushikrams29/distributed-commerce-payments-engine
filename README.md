@@ -2,6 +2,9 @@
 
 > Not another Amazon clone — the backend architecture that would actually run one.
 
+📄 **[Product Requirements (PRD)](./docs/PRD.md)** — what the system does, end-to-end user/failure flows, functional requirements.
+🏗️ **[Architecture & Technical Design](./docs/ARCHITECTURE.md)** — services, data model, event contracts, full repo scaffold.
+
 ## 1. What this is and why it exists
 
 A pure backend, event-driven microservices platform that simulates the core of a real e-commerce + payments system: order lifecycle management, inventory reservation under concurrency, idempotent payment processing, async notifications, and a lightweight recommendation service — all wired together with the reliability patterns (outbox, idempotency keys, distributed locks, rate limiting, distributed tracing) that separate a "CRUD demo" from a system that could survive production traffic.
@@ -18,7 +21,7 @@ graph TD
     Gateway --> OrderSvc[Order Service]
     Gateway --> InventorySvc[Inventory Service]
     OrderSvc -->|publish| Outbox[(Outbox Table)]
-    Outbox -->|relay| Broker[[RabbitMQ / Kafka]]
+    Outbox -->|relay| Broker[[RabbitMQ]]
     Broker --> PaymentSvc[Payment Service]
     Broker --> NotificationSvc[Notification Service]
     Broker --> RecoSvc[Recommendation Service]
@@ -29,17 +32,18 @@ graph TD
     OTel --> Grafana[Prometheus + Grafana]
 ```
 
-_Diagram will be refined as services are actually built — placeholder until Week 5–6 (event stream + dashboard)._
+Full architecture, data model, and scaffold: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). Full end-to-end flow (happy path + failure/compensation paths): [`docs/PRD.md`](./docs/PRD.md).
 
 ## 3. Key engineering decisions & trade-offs
 
-_This section is the living log of "why," not just "what." Updated as each decision is made — not written retroactively at the end._
+_This section is the living log of "why," not just "what." Full log with reasoning in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md#13-key-decisions-log) — summarized here._
 
 | Decision | Why | Trade-off accepted |
 |---|---|---|
-| _(TBD)_ Outbox pattern over direct dual-write | Reliable event publishing without 2PC | Slight latency from relay polling/CDC |
-| _(TBD)_ `SELECT FOR UPDATE` + Redis Redlock for payment idempotency | Prevent double-spend under concurrent requests | Added write contention under high load |
-| _(TBD)_ Token Bucket in Redis for rate limiting | Simple, well-understood, fast | Not as fair as sliding-window under bursty traffic |
+| RabbitMQ over Kafka | Lower operational complexity for a first solo distributed system; still demonstrates outbox/retry/DLQ fully | Less "impressive" than Kafka for partition/consumer-group interview questions — documented as a possible v2 migration |
+| `SELECT FOR UPDATE` + Redis Redlock for payment idempotency | Prevent double-spend under concurrent requests | Added write contention under high load |
+| Token Bucket in Redis for rate limiting | Simple, well-understood, fast | Not as fair as sliding-window under bursty traffic |
+| Saga via orchestration, not choreography | Easier to reason about/debug when implementing the pattern for the first time | Order Service becomes a more central/coupled coordinator |
 
 ## 4. Services
 
