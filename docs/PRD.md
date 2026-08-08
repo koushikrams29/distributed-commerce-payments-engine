@@ -185,7 +185,7 @@ Detailed week-by-week engineering schedule is tracked separately outside this re
 
 ## 12. Open questions
 
-- Exact enum values for order status — finalize alongside the Order state machine implementation (M1).
+- ~~Exact enum values for order status~~ — **resolved (M1):** `pending`, `reserved`, `paid`, `fulfilled`, `cancelled`. See `ARCHITECTURE.md` §13.
 - Whether a minimal shopper-facing UI is worth building as a stretch item, or whether API-only (Postman collection / script) is sufficient for demo purposes. Leaning toward API-only + a good demo script, per non-goals above.
 
 ## 13. See also

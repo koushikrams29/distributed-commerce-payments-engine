@@ -55,7 +55,7 @@ Types shown as Postgres types; every table has `id UUID PK` unless noted.
 orders
   id              UUID PK
   user_id         UUID
-  status          ENUM(pending, reserved, paid, fulfilled, cancelled)
+  status          VARCHAR(20)   -- pending | reserved | paid | fulfilled | cancelled
   total_amount    NUMERIC(12,2)
   created_at      TIMESTAMPTZ
   updated_at      TIMESTAMPTZ
@@ -63,8 +63,8 @@ orders
 
 order_items
   id              UUID PK
-  order_id        UUID FK -> orders.id
-  product_id      UUID FK -> products.id
+  order_id        UUID FK -> orders.id      -- real FK: same database
+  product_id      UUID                      -- NO FK: products is owned by Inventory Service
   qty             INTEGER
   unit_price      NUMERIC(12,2)
 
@@ -83,44 +83,50 @@ products
 
 stock_reservations
   id              UUID PK
-  order_id        UUID FK -> orders.id
-  product_id      UUID FK -> products.id
+  order_id        UUID                      -- NO FK: orders is owned by Order Service
+  product_id      UUID FK -> products.id    -- real FK: same database
   qty             INTEGER
-  status          ENUM(held, released, committed)
+  status          VARCHAR(20)               -- held | released | committed
   expires_at      TIMESTAMPTZ
 
 payments
   id                UUID PK
-  order_id          UUID FK -> orders.id
+  order_id          UUID                    -- NO FK: orders is owned by Order Service
   idempotency_key   VARCHAR
-  status            ENUM(pending, succeeded, failed)
+  status            VARCHAR(20)             -- pending | succeeded | failed
   amount            NUMERIC(12,2)
   created_at        TIMESTAMPTZ
   -- unique index: (idempotency_key) — enforces FR-3 at the DB level, not just app logic
 
 ledger_entries
   id              UUID PK
-  payment_id      UUID FK -> payments.id
-  direction       ENUM(debit, credit)
+  payment_id      UUID FK -> payments.id    -- real FK: same database
+  direction       VARCHAR(10)               -- debit | credit
   amount          NUMERIC(12,2)
   created_at      TIMESTAMPTZ
 
 notifications
   id              UUID PK
-  order_id        UUID FK -> orders.id
-  channel         ENUM(email, sms)
-  status          ENUM(sent, failed)
+  order_id        UUID                      -- NO FK: orders is owned by Order Service
+  channel         VARCHAR(20)               -- email | sms
+  status          VARCHAR(20)               -- sent | failed
   sent_at         TIMESTAMPTZ
 
 co_purchase_counts
   id              UUID PK
-  product_id_a    UUID FK -> products.id
-  product_id_b    UUID FK -> products.id
+  product_id_a    UUID                      -- NO FK: products is owned by Inventory Service
+  product_id_b    UUID
   count           INTEGER
   -- unique index: (product_id_a, product_id_b)
 ```
 
-_Enum values above are the working draft — see `PRD.md` §12 for the one still explicitly open._
+### 📘 Concept — Why some references are foreign keys and others aren't
+
+A foreign key can only be enforced against a table in the **same database**. Since each service owns its own database (§9), any reference that crosses a service boundary is stored as a plain UUID with no FK constraint — the database cannot check it.
+
+That's not a shortcut, it's the defining constraint of this architecture: giving up database-enforced integrity across services is exactly *why* we need the saga pattern, compensating actions, and the outbox. If one database with foreign keys could keep everything consistent, none of those patterns would be necessary.
+
+Status columns are stored as `VARCHAR` with the allowed values enforced in application code, rather than as native Postgres `ENUM` types. Native enums require an `ALTER TYPE` migration to add a single new value, which is needlessly painful; `VARCHAR` + an application-level enum keeps schema changes cheap while still giving one authoritative list of valid values in the code.
 
 ## 4. API contracts
 
@@ -360,7 +366,11 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Saga via orchestration, not choreography | Easier to reason about/debug when implementing the pattern for the first time | ✅ Decided |
 | Layered structure (routers/services/repositories/models) in every service | Testability + separation of concerns; the actual difference between "mature" and "fresher" codebases | ✅ Decided |
 | Services verify JWT independently, not just the Gateway | Defense in depth — no service is exploitable via direct access | ✅ Decided |
-| Order status enum values | — | ⏳ Open — see PRD §12 |
+| Order status values: `pending`, `reserved`, `paid`, `fulfilled`, `cancelled` | Matches the saga's state transitions exactly; stored as `VARCHAR` + application-level enum so adding a status doesn't need an `ALTER TYPE` migration | ✅ Decided |
+| No foreign keys across service boundaries | A FK can only be enforced within one database; cross-service references are plain UUIDs, with consistency maintained by events/sagas instead | ✅ Decided |
+| One Postgres container locally, one database per service | Enforces the service data boundary (cross-service FKs become impossible by construction) without running six containers on a laptop | ✅ Decided |
+| Money stored as `NUMERIC(12,2)`, never float | Floating point can't represent decimal fractions exactly — unacceptable for currency | ✅ Decided |
+| Alembic for schema migrations, not `create_all()` | `create_all()` can only create missing tables, never evolve existing ones without data loss | ✅ Decided |
 | Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |
 
 ## 14. Risks
