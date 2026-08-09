@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes an in-flight run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test ${{ matrix.service }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      # One service failing should not hide the results of the others.
+      fail-fast: false
+      matrix:
+        service:
+          - order-service
+
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+
+    env:
+      # Required because app.core.config validates settings at import time.
+      # Never actually connected to: integration tests start a throwaway
+      # Postgres via testcontainers and point the app at that instead.
+      DATABASE_URL: postgresql+psycopg2://ci:ci@localhost:5432/ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: services/${{ matrix.service }}/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest

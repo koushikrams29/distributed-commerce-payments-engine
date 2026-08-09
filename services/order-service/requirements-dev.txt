@@ -3,4 +3,6 @@
 pytest
 pytest-asyncio
 httpx
-testcontainers[postgres]
+# Upper bound: 4.x moved the Postgres container to testcontainers.community,
+# so a major bump would break tests/conftest.py imports.
+testcontainers[postgres]>=4.15,<5

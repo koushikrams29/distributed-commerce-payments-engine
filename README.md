@@ -2,6 +2,8 @@
 
 > Not another Amazon clone — the backend architecture that would actually run one.
 
+[![CI](https://github.com/koushikrams29/distributed-commerce-payments-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/koushikrams29/distributed-commerce-payments-engine/actions/workflows/ci.yml)
+
 📄 **[Product Requirements (PRD)](./docs/PRD.md)** — what the system does, end-to-end user/failure flows, functional requirements.
 🏗️ **[Architecture & Technical Design](./docs/ARCHITECTURE.md)** — services, data model, event contracts, full repo scaffold.
 

@@ -349,12 +349,13 @@ This is what separates a "mature" codebase from a fresher one: **routers never c
 
 - **Unit tests** (`services/*/tests/unit/`) — business logic and schema validation in isolation (order totals, state transitions, rate limiter math), no DB or broker. Must stay fast enough to run on every save; the Order Service suite runs in ~0.1s.
 - **Integration tests** (`services/*/tests/integration/`) — a throwaway Postgres/Redis/RabbitMQ per session via `testcontainers`, proving the FRs in the PRD (e.g., fire concurrent requests, assert exactly one succeeds). Marked `integration` so the fast loop can be run with `pytest -m "not integration"`.
-- **CI** (`.github/workflows/ci.yml`) — runs the full suite on every PR; merges blocked on failure. Also runs `alembic check`, which fails the build when a model has changed without a corresponding migration.
+- **CI** (`.github/workflows/ci.yml`) — runs the full suite on every push to `main` and every PR; merges blocked on failure. Services are a build matrix, so adding a service is a one-line change.
 
-Two rules the Order Service suite establishes for every service that follows:
+Three rules the Order Service suite establishes for every service that follows:
 
 1. **Integration tests run the real Alembic migrations against the throwaway database**, on the same Postgres image as `infra/docker-compose.yml`. The schema under test is therefore the schema that migrations actually produce, and a broken migration fails the test suite rather than a deployment.
-2. **Idempotency keys are generated per test run, never hardcoded.** A key is single-use for life, so a fixed key makes a test pass once and fail on every subsequent run.
+2. **Migration drift is a test, not a separate CI step** (`tests/integration/test_migrations.py`). It compares the migrated database against the ORM metadata — the same comparison `alembic check` performs — but reuses the container the suite already started, so it also runs locally and needs no extra CI infrastructure. A model edited without `alembic revision --autogenerate` fails the build.
+3. **Idempotency keys are generated per test run, never hardcoded.** A key is single-use for life, so a fixed key makes a test pass once and fail on every subsequent run.
 
 Tests are written alongside each feature as it's built, not deferred to a dedicated "testing phase" — the engineering schedule that enforces this is tracked separately outside this repository.
 
