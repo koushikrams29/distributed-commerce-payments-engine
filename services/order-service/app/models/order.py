@@ -25,6 +25,9 @@ class Order(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(255), nullable=False, unique=True
+    )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=OrderStatus.PENDING.value, index=True
     )

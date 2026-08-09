@@ -12,6 +12,7 @@ class OrderItemCreate(BaseModel):
 
 class OrderCreate(BaseModel):
     user_id: uuid.UUID
+    idempotency_key: str = Field(min_length=8, max_length=255)
     items: list[OrderItemCreate] = Field(min_length=1)
 
 

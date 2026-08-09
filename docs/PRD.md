@@ -160,6 +160,7 @@ All views update via WebSocket push (FR-6) — no manual refresh required.
 | FR-7 | All mutating endpoints must be rate-limited per client. |
 | FR-8 | A notification (logged, not real email) must be triggered on successful fulfillment. |
 | FR-9 | Recommendation data must update after a successful order, without blocking the order's own completion. |
+| FR-10 | System must never create two orders for the same idempotency key. A replayed submission must return the originally created order. |
 
 ## 10. Non-functional requirements
 

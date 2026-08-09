@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
@@ -11,8 +11,13 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 
 
 @router.post("", response_model=OrderRead, status_code=status.HTTP_201_CREATED)
-def create_order(payload: OrderCreate, db: Session = Depends(get_db)):
-    return OrderService(db).create_order(payload)
+def create_order(
+    payload: OrderCreate, response: Response, db: Session = Depends(get_db)
+):
+    order, created = OrderService(db).create_order(payload)
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return order
 
 
 @router.get("/{order_id}", response_model=OrderRead)

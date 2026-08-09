@@ -55,11 +55,15 @@ Types shown as Postgres types; every table has `id UUID PK` unless noted.
 orders
   id              UUID PK
   user_id         UUID
+  idempotency_key VARCHAR(255) NOT NULL
   status          VARCHAR(20)   -- pending | reserved | paid | fulfilled | cancelled
   total_amount    NUMERIC(12,2)
   created_at      TIMESTAMPTZ
   updated_at      TIMESTAMPTZ
   -- index: (status) for dashboard filtering
+  -- unique constraint: (idempotency_key) — enforces FR-10 / PRD §7.2 at the DB
+  --   level. A retried submission collides here and returns the original order
+  --   instead of creating a second one.
 
 order_items
   id              UUID PK
@@ -144,9 +148,11 @@ All routes below are served through the Gateway (`/api/v1/...`), which proxies t
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
-| POST | `/orders` | shopper | `{items: [{product_id, qty}], idempotency_key}` | `201 {order_id, status}` |
+| POST | `/orders` | shopper | `{items: [{product_id, qty}], idempotency_key}` | `201` with the created order; `200` with the existing order when the `idempotency_key` was already used |
 | GET | `/orders/{id}` | shopper (own) / admin (any) | — | `{order_id, status, items, total_amount, timestamps}` |
 | GET | `/orders` | admin | query: `status`, `cursor` | cursor-paginated list of orders |
+
+`user_id` is currently accepted in the `POST /orders` request body as a temporary measure; it moves to the verified JWT subject once authentication lands (§6), at which point a client can no longer create orders on another user's behalf.
 
 ### Inventory (Inventory Service)
 
@@ -371,6 +377,9 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | One Postgres container locally, one database per service | Enforces the service data boundary (cross-service FKs become impossible by construction) without running six containers on a laptop | ✅ Decided |
 | Money stored as `NUMERIC(12,2)`, never float | Floating point can't represent decimal fractions exactly — unacceptable for currency | ✅ Decided |
 | Alembic for schema migrations, not `create_all()` | `create_all()` can only create missing tables, never evolve existing ones without data loss | ✅ Decided |
+| Idempotency enforced by a unique DB constraint, not an application-level check | A check-then-insert has a race window: two concurrent requests with the same key can both pass the check. Only the constraint is a true guarantee; the app-level lookup is a fast path that avoids the exception in the common case | ✅ Decided |
+| `idempotency_key` required, not optional | An optional key would let a caller silently opt out of the exactly-once guarantee the PRD promises; making it mandatory pushes retry-safety onto every client by construction | ✅ Decided |
+| Replayed request returns `200`, not `201` | `201 Created` would assert that a resource was created, which is false on a replay; the caller still receives the order, correctly labelled as pre-existing | ✅ Decided |
 | Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |
 
 ## 14. Risks
