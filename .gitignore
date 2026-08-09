@@ -5,6 +5,11 @@ __pycache__/
 venv/
 *.egg-info/
 
+#Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
 #Environment/secrets
 .env 
 .env.*.local

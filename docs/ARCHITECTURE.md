@@ -347,9 +347,14 @@ This is what separates a "mature" codebase from a fresher one: **routers never c
 
 ## 11. Testing strategy
 
-- **Unit tests** (`services/*/tests/unit/`) — business logic in isolation (order state transitions, rate limiter math, idempotency lookups), no real DB/broker.
-- **Integration tests** (`services/*/tests/integration/`) — real Postgres/Redis/RabbitMQ via `testcontainers`, proving the FRs in the PRD (e.g., fire concurrent reservation requests, assert exactly one succeeds).
-- **CI** (`.github/workflows/ci.yml`) — runs the full suite on every PR; merges blocked on failure.
+- **Unit tests** (`services/*/tests/unit/`) — business logic and schema validation in isolation (order totals, state transitions, rate limiter math), no DB or broker. Must stay fast enough to run on every save; the Order Service suite runs in ~0.1s.
+- **Integration tests** (`services/*/tests/integration/`) — a throwaway Postgres/Redis/RabbitMQ per session via `testcontainers`, proving the FRs in the PRD (e.g., fire concurrent requests, assert exactly one succeeds). Marked `integration` so the fast loop can be run with `pytest -m "not integration"`.
+- **CI** (`.github/workflows/ci.yml`) — runs the full suite on every PR; merges blocked on failure. Also runs `alembic check`, which fails the build when a model has changed without a corresponding migration.
+
+Two rules the Order Service suite establishes for every service that follows:
+
+1. **Integration tests run the real Alembic migrations against the throwaway database**, on the same Postgres image as `infra/docker-compose.yml`. The schema under test is therefore the schema that migrations actually produce, and a broken migration fails the test suite rather than a deployment.
+2. **Idempotency keys are generated per test run, never hardcoded.** A key is single-use for life, so a fixed key makes a test pass once and fail on every subsequent run.
 
 Tests are written alongside each feature as it's built, not deferred to a dedicated "testing phase" — the engineering schedule that enforces this is tracked separately outside this repository.
 
@@ -380,6 +385,9 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Idempotency enforced by a unique DB constraint, not an application-level check | A check-then-insert has a race window: two concurrent requests with the same key can both pass the check. Only the constraint is a true guarantee; the app-level lookup is a fast path that avoids the exception in the common case | ✅ Decided |
 | `idempotency_key` required, not optional | An optional key would let a caller silently opt out of the exactly-once guarantee the PRD promises; making it mandatory pushes retry-safety onto every client by construction | ✅ Decided |
 | Replayed request returns `200`, not `201` | `201 Created` would assert that a resource was created, which is false on a replay; the caller still receives the order, correctly labelled as pre-existing | ✅ Decided |
+| Integration tests use `testcontainers`, not a shared test database | A throwaway container per session means tests never depend on machine state or leftover rows, and CI needs no pre-provisioned database | ✅ Decided |
+| Test dependencies split into `requirements-dev.txt` | Production images should not ship `pytest`, `httpx`, or the Docker client library used by `testcontainers` | ✅ Decided |
+| `alembic.ini` ships with no `sqlalchemy.url` | The connection string is resolved in `env.py` from the environment, so no credentials are committed and tests can point migrations at a throwaway database | ✅ Decided |
 | Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |
 
 ## 14. Risks
