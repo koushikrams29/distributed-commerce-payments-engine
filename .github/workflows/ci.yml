@@ -21,6 +21,7 @@ jobs:
       matrix:
         service:
           - order-service
+          - gateway
 
     defaults:
       run:
@@ -31,6 +32,8 @@ jobs:
       # Never actually connected to: integration tests start a throwaway
       # Postgres via testcontainers and point the app at that instead.
       DATABASE_URL: postgresql+psycopg2://ci:ci@localhost:5432/ci
+      JWT_SECRET: ci-only-test-secret-at-least-32-chars
+      SEED_DEV_USERS: "false"
 
     steps:
       - uses: actions/checkout@v7
