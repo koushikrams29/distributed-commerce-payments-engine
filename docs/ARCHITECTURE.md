@@ -219,12 +219,13 @@ A trace ID generated at the Gateway propagates through every HTTP call, queue me
 
 ## 6. Security design
 
-- **AuthN:** JWT access + refresh tokens issued by the Gateway via an OAuth2-compatible password flow (`OAuth2PasswordBearer`). Access tokens short-lived; refresh tokens longer-lived and rotated on use.
+- **AuthN:** JWT access + opaque refresh tokens issued by the Gateway via an OAuth2-compatible password flow (`OAuth2PasswordRequestForm`). Access tokens are short-lived HS256 JWTs; refresh tokens are random strings stored only as SHA-256 hashes and rotated on every use.
 - **AuthZ:** Two roles, `shopper` and `admin`, carried as a claim in the JWT. Admin-only endpoints (dashboard reads, full order/payment lists) are enforced by a FastAPI dependency that checks the role claim — not by trusting the frontend to hide buttons.
-- **Defense in depth:** downstream services (Order, Inventory, Payment, Recommendation) verify the JWT themselves via a shared `libs/common/auth` helper, rather than blindly trusting requests forwarded by the Gateway. A service is never exploitable by being called directly, bypassing the Gateway.
+- **Defense in depth:** downstream services (Order, Inventory, Payment, Recommendation) verify the JWT themselves via `libs/common` (`commerce_common.auth`), rather than blindly trusting requests forwarded by the Gateway. A service is never exploitable by being called directly, bypassing the Gateway.
 - **Secrets management:** local dev via a git-ignored `.env` file (see `.env.example` for required keys); production secrets live in the hosting platform's env var store — never committed.
-- **Rate limiting as a security control:** the token bucket limiter on `/auth/login` doubles as brute-force/credential-stuffing protection, not just general abuse prevention.
+- **Rate limiting as a security control:** the token bucket limiter on `/auth/login` doubles as brute-force/credential-stuffing protection, not just general abuse prevention. (Not yet implemented — planned with Redis.)
 - **Relevant OWASP Top 10 coverage:** injection (parameterized queries via SQLAlchemy, never string-built SQL), broken authentication (short-lived access tokens + refresh rotation), security misconfiguration (no default credentials, secrets never in source control).
+- **Dev seed users** (when `SEED_DEV_USERS=true`): `shopper@example.com` / `shopper-pass-123` and `admin@example.com` / `admin-pass-123`. Local only — never enable in production.
 
 ## 7. Repo scaffold
 
@@ -389,6 +390,10 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Integration tests use `testcontainers`, not a shared test database | A throwaway container per session means tests never depend on machine state or leftover rows, and CI needs no pre-provisioned database | ✅ Decided |
 | Test dependencies split into `requirements-dev.txt` | Production images should not ship `pytest`, `httpx`, or the Docker client library used by `testcontainers` | ✅ Decided |
 | `alembic.ini` ships with no `sqlalchemy.url` | The connection string is resolved in `env.py` from the environment, so no credentials are committed and tests can point migrations at a throwaway database | ✅ Decided |
+| JWT access tokens signed with HS256 (shared secret) | Simplest correct option for a solo monorepo; rotate to RS256 later if key distribution becomes a real concern | ✅ Decided |
+| Opaque refresh tokens hashed in the Gateway DB, rotated on use | Stolen refresh tokens can be revoked; rotation means a leaked token works at most once | ✅ Decided |
+| Shared `libs/common` (`commerce_common`) package installed editable into each service | One implementation of JWT verify/password hash; services cannot drift into incompatible token formats | ✅ Decided |
+| Users live in the Gateway database, not Order Service | Auth is a Gateway concern; Order Service only needs the verified `sub` from the JWT | ✅ Decided |
 | Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |
 
 ## 14. Risks
