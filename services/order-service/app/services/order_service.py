@@ -17,27 +17,31 @@ class OrderService:
         self.db = db
         self.repository = OrderRepository(db)
 
-    def create_order(self, payload: OrderCreate) -> tuple[Order, bool]:
+    def create_order(
+        self, payload: OrderCreate, *, user_id: uuid.UUID
+    ) -> tuple[Order, bool]:
         """Create an order, or return the existing one for a replayed request.
 
         Returns (order, created) where created is False when this request was
-        a replay of one already processed.
+        a replay of one already processed for this user.
         """
-        existing = self.repository.get_by_idempotency_key(payload.idempotency_key)
+        existing = self.repository.get_by_idempotency_key(
+            user_id=user_id, idempotency_key=payload.idempotency_key
+        )
         if existing is not None:
             return existing, False
 
-        order = self._build_order(payload)
+        order = self._build_order(payload, user_id=user_id)
 
         try:
             self.repository.add(order)
             self.db.commit()
         except IntegrityError:
-            # A concurrent request with the same key committed first. The unique
-            # constraint - not the check above - is what actually guarantees
-            # only one order exists, so treat this as a replay.
+            # A concurrent request with the same (user, key) committed first.
             self.db.rollback()
-            existing = self.repository.get_by_idempotency_key(payload.idempotency_key)
+            existing = self.repository.get_by_idempotency_key(
+                user_id=user_id, idempotency_key=payload.idempotency_key
+            )
             if existing is None:
                 raise
             return existing, False
@@ -48,7 +52,7 @@ class OrderService:
     def get_order(self, order_id: uuid.UUID) -> Order | None:
         return self.repository.get_by_id(order_id)
 
-    def _build_order(self, payload: OrderCreate) -> Order:
+    def _build_order(self, payload: OrderCreate, *, user_id: uuid.UUID) -> Order:
         items = [
             OrderItem(
                 product_id=item.product_id,
@@ -59,7 +63,7 @@ class OrderService:
         ]
 
         return Order(
-            user_id=payload.user_id,
+            user_id=user_id,
             idempotency_key=payload.idempotency_key,
             status=OrderStatus.PENDING.value,
             total_amount=sum(item.unit_price * item.qty for item in items),

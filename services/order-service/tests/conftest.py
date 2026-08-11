@@ -1,5 +1,18 @@
+"""Shared fixtures for the Order Service test suite.
+
+JWT_SECRET is set before importing the app so Settings validates even when a
+developer runs tests without a local .env.
+"""
+
+import os
 from pathlib import Path
 from typing import Iterator
+
+os.environ.setdefault(
+    "DATABASE_URL",
+    "postgresql+psycopg2://ci:ci@localhost:5432/ci_unused_placeholder",
+)
+os.environ.setdefault("JWT_SECRET", "test-secret-at-least-32-characters-long")
 
 import pytest
 from alembic import command

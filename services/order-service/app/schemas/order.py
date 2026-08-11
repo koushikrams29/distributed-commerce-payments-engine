@@ -11,7 +11,12 @@ class OrderItemCreate(BaseModel):
 
 
 class OrderCreate(BaseModel):
-    user_id: uuid.UUID
+    """Request body for creating an order.
+
+    `user_id` is intentionally absent — it comes from the verified JWT so a
+    client cannot create orders on another user's behalf.
+    """
+
     idempotency_key: str = Field(min_length=8, max_length=255)
     items: list[OrderItemCreate] = Field(min_length=1)
 

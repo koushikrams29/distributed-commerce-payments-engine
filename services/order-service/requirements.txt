@@ -1,3 +1,4 @@
+-e ../../libs/common
 fastapi
 uvicorn[standard]
 pydantic-settings
