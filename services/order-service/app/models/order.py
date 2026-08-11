@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, func
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,14 +20,19 @@ class OrderStatus(str, Enum):
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        # Key is unique per shopper, not globally — otherwise shopper B could
+        # replay shopper A's key and receive A's order.
+        UniqueConstraint(
+            "user_id", "idempotency_key", name="uq_orders_user_idempotency_key"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    idempotency_key: Mapped[str] = mapped_column(
-        String(255), nullable=False, unique=True
-    )
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=OrderStatus.PENDING.value, index=True
     )

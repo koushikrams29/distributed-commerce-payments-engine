@@ -19,10 +19,15 @@ class OrderRepository:
         stmt = select(Order).where(Order.id == order_id).options(selectinload(Order.items))
         return self.db.execute(stmt).scalar_one_or_none()
 
-    def get_by_idempotency_key(self, idempotency_key: str) -> Order | None:
+    def get_by_idempotency_key(
+        self, *, user_id: uuid.UUID, idempotency_key: str
+    ) -> Order | None:
         stmt = (
             select(Order)
-            .where(Order.idempotency_key == idempotency_key)
+            .where(
+                Order.user_id == user_id,
+                Order.idempotency_key == idempotency_key,
+            )
             .options(selectinload(Order.items))
         )
         return self.db.execute(stmt).scalar_one_or_none()

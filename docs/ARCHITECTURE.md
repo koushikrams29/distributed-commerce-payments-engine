@@ -40,7 +40,7 @@ Order, Inventory, and Payment have genuinely different consistency requirements:
 
 | Service | Responsibility | Owns data | Public API? |
 |---|---|---|---|
-| Gateway | AuthN/AuthZ (JWT+OAuth2), rate limiting, request routing, WebSocket hub for the dashboard | — (stateless) | Yes — sole public entry point |
+| Gateway | AuthN/AuthZ (JWT+OAuth2), rate limiting, request routing, WebSocket hub for the dashboard | `users`, `refresh_tokens` | Yes — sole public entry point |
 | Order Service | Order lifecycle state machine, saga orchestration | `orders`, `order_items`, `outbox` | Via Gateway only |
 | Inventory Service | Stock levels, reservation, release-on-failure | `products`, `stock_reservations` | Via Gateway only |
 | Payment Service | Idempotent mocked charge processing, ledger | `payments`, `ledger_entries`, `idempotency_keys` | Via Gateway only |
@@ -61,9 +61,10 @@ orders
   created_at      TIMESTAMPTZ
   updated_at      TIMESTAMPTZ
   -- index: (status) for dashboard filtering
-  -- unique constraint: (idempotency_key) — enforces FR-10 / PRD §7.2 at the DB
-  --   level. A retried submission collides here and returns the original order
-  --   instead of creating a second one.
+  -- unique constraint: (user_id, idempotency_key) — enforces FR-10 / PRD §7.2
+  --   per shopper. A retried submission collides here and returns the original
+  --   order. Keys are not globally unique so two shoppers may reuse the same
+  --   client-generated string without leaking each other's orders.
 
 order_items
   id              UUID PK
@@ -148,11 +149,11 @@ All routes below are served through the Gateway (`/api/v1/...`), which proxies t
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
-| POST | `/orders` | shopper | `{items: [{product_id, qty}], idempotency_key}` | `201` with the created order; `200` with the existing order when the `idempotency_key` was already used |
+| POST | `/orders` | shopper (JWT) | `{items: [{product_id, qty}], idempotency_key}` | `201` with the created order; `200` with the existing order when the `(user, idempotency_key)` pair was already used |
 | GET | `/orders/{id}` | shopper (own) / admin (any) | — | `{order_id, status, items, total_amount, timestamps}` |
 | GET | `/orders` | admin | query: `status`, `cursor` | cursor-paginated list of orders |
 
-`user_id` is currently accepted in the `POST /orders` request body as a temporary measure; it moves to the verified JWT subject once authentication lands (§6), at which point a client can no longer create orders on another user's behalf.
+`user_id` is taken from the verified JWT `sub` claim — it is not accepted in the request body. Shoppers receive `404` (not `403`) when reading another user's order so that order IDs are not confirmed to exist across accounts.
 
 ### Inventory (Inventory Service)
 
@@ -394,6 +395,8 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Opaque refresh tokens hashed in the Gateway DB, rotated on use | Stolen refresh tokens can be revoked; rotation means a leaked token works at most once | ✅ Decided |
 | Shared `libs/common` (`commerce_common`) package installed editable into each service | One implementation of JWT verify/password hash; services cannot drift into incompatible token formats | ✅ Decided |
 | Users live in the Gateway database, not Order Service | Auth is a Gateway concern; Order Service only needs the verified `sub` from the JWT | ✅ Decided |
+| Idempotency unique on `(user_id, idempotency_key)`, not the key alone | A global unique key would let shopper B replay shopper A's key and receive A's order | ✅ Decided |
+| Order Service verifies JWTs with the shared `JWT_SECRET` | Defense in depth — calling Order Service directly still requires a valid token | ✅ Decided |
 | Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |
 
 ## 14. Risks
