@@ -39,3 +39,8 @@ class OrderRead(BaseModel):
     total_amount: Decimal
     created_at: datetime
     items: list[OrderItemRead]
+
+
+class OrderListResponse(BaseModel):
+    items: list[OrderRead]
+    next_cursor: str | None = None

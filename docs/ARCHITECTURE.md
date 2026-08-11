@@ -397,6 +397,8 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Users live in the Gateway database, not Order Service | Auth is a Gateway concern; Order Service only needs the verified `sub` from the JWT | ✅ Decided |
 | Idempotency unique on `(user_id, idempotency_key)`, not the key alone | A global unique key would let shopper B replay shopper A's key and receive A's order | ✅ Decided |
 | Order Service verifies JWTs with the shared `JWT_SECRET` | Defense in depth — calling Order Service directly still requires a valid token | ✅ Decided |
+| `GET /orders` is admin-only; shoppers use `GET /orders/{id}` for their own | Listing every order is an operations concern; shoppers must not enumerate the table | ✅ Decided |
+| Cursor (keyset) pagination, not offset | Offset pages drift under concurrent inserts; `(created_at, id)` cursors stay stable | ✅ Decided |
 | Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |
 
 ## 14. Risks
