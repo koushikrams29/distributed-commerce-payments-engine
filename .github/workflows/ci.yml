@@ -22,6 +22,7 @@ jobs:
         service:
           - order-service
           - gateway
+          - inventory-service
 
     defaults:
       run:

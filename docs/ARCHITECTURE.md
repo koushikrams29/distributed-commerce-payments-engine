@@ -159,8 +159,12 @@ All routes below are served through the Gateway (`/api/v1/...`), which proxies t
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
-| GET | `/products` | admin | query: `cursor` | cursor-paginated list of `{id, name, price, stock_qty}` |
-| GET | `/products/{id}` | admin | — | product detail + active reservations |
+| GET | `/products` | admin | — | `{items: [{id, name, price, stock_qty}]}` |
+| GET | `/products/{id}` | admin | — | product detail + active (`held`) reservations |
+| POST | `/reservations` | authenticated | `{order_id, items: [{product_id, qty}]}` | `201` with held reservations; `409` if stock insufficient |
+| POST | `/reservations/{order_id}/release` | authenticated | — | restores held stock for that order |
+
+Until RabbitMQ lands, Order Service (and tests) call reserve/release over HTTP. The locking semantics are the same ones the future `order.created` consumer will use.
 
 ### Payments (Payment Service)
 
@@ -399,6 +403,8 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Order Service verifies JWTs with the shared `JWT_SECRET` | Defense in depth — calling Order Service directly still requires a valid token | ✅ Decided |
 | `GET /orders` is admin-only; shoppers use `GET /orders/{id}` for their own | Listing every order is an operations concern; shoppers must not enumerate the table | ✅ Decided |
 | Cursor (keyset) pagination, not offset | Offset pages drift under concurrent inserts; `(created_at, id)` cursors stay stable | ✅ Decided |
+| Inventory reservations use `SELECT ... FOR UPDATE` | Turns concurrent “read stock then write” races into a queue so reserved stock cannot exceed available (FR-2) | ✅ Decided |
+| Reserve/release exposed as HTTP until RabbitMQ exists | Same business logic the future event consumer will call; keeps FR-2 testable before the broker is wired | ✅ Decided |
 | Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |
 
 ## 14. Risks
