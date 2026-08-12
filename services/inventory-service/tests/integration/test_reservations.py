@@ -138,3 +138,19 @@ def test_shopper_cannot_list_products(client: TestClient) -> None:
     response = client.get("/products", headers=auth_header(role=Role.SHOPPER))
 
     assert response.status_code == 403
+
+
+def test_shopper_can_read_a_product_for_checkout(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    product = seed_product(session_factory, name="Checkout Item", stock_qty=4)
+
+    response = client.get(
+        f"/products/{product.id}", headers=auth_header(role=Role.SHOPPER)
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == str(product.id)
+    assert body["stock_qty"] == 4
+    assert body["active_reservations"] == []

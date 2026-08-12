@@ -3,7 +3,6 @@ from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
-from app.services.order_service import PLACEHOLDER_UNIT_PRICE
 from commerce_common.auth import Role
 from tests.helpers import auth_header, fresh_key, order_payload
 
@@ -16,7 +15,7 @@ def test_creating_an_order_returns_201(client: TestClient) -> None:
     assert response.status_code == 201
     body = response.json()
     assert body["status"] == "pending"
-    assert Decimal(str(body["total_amount"])) == PLACEHOLDER_UNIT_PRICE * 2
+    assert Decimal(str(body["total_amount"])) == Decimal("200.00")
     assert len(body["items"]) == 1
 
 

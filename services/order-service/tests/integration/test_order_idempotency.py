@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.schemas.order import OrderCreate
 from app.services.order_service import OrderService
+from tests.conftest import FakeInventoryClient
 from tests.helpers import auth_header, fresh_key, order_payload
 
 
@@ -80,7 +81,9 @@ def test_two_users_can_reuse_the_same_idempotency_key(
 
 
 def test_simultaneous_requests_with_the_same_key_create_one_order(
-    session_factory: sessionmaker[Session], engine: Engine
+    session_factory: sessionmaker[Session],
+    engine: Engine,
+    fake_inventory: FakeInventoryClient,
 ) -> None:
     """The unique constraint, not the pre-check, is what makes this safe."""
     user_id = uuid.uuid4()
@@ -91,7 +94,9 @@ def test_simultaneous_requests_with_the_same_key_create_one_order(
         db = session_factory()
         try:
             barrier.wait(timeout=10)
-            order, created = OrderService(db).create_order(payload, user_id=user_id)
+            order, created = OrderService(db, inventory=fake_inventory).create_order(
+                payload, user_id=user_id, access_token="test-token"
+            )
             return order.id, created
         finally:
             db.close()

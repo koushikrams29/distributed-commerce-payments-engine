@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     database_url: str
     # Must match the Gateway's JWT_SECRET so tokens issued there verify here.
     jwt_secret: str
+    inventory_service_url: str = "http://127.0.0.1:8002"
 
 
 settings = Settings()

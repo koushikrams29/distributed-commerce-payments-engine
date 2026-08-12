@@ -5,6 +5,8 @@ developer runs tests without a local .env.
 """
 
 import os
+import uuid
+from decimal import Decimal
 from pathlib import Path
 from typing import Iterator
 
@@ -13,6 +15,7 @@ os.environ.setdefault(
     "postgresql+psycopg2://ci:ci@localhost:5432/ci_unused_placeholder",
 )
 os.environ.setdefault("JWT_SECRET", "test-secret-at-least-32-characters-long")
+os.environ.setdefault("INVENTORY_SERVICE_URL", "http://inventory.test")
 
 import pytest
 from alembic import command
@@ -21,10 +24,38 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.api.routers.orders import get_inventory_client
+from app.clients.inventory import ProductInfo
 from app.core.db import get_db
 from app.main import app
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
+
+
+class FakeInventoryClient:
+    """Stand-in for Inventory so order tests do not need a second container."""
+
+    def __init__(self, *, price: Decimal = Decimal("100.00"), reserve_ok: bool = True):
+        self.price = price
+        self.reserve_ok = reserve_ok
+        self.reserve_calls: list[uuid.UUID] = []
+
+    def get_product(self, product_id: uuid.UUID, *, access_token: str) -> ProductInfo:
+        return ProductInfo(
+            id=product_id,
+            name="Test Product",
+            price=self.price,
+            stock_qty=100,
+        )
+
+    def reserve(
+        self, *, order_id: uuid.UUID, items: list[dict], access_token: str
+    ) -> None:
+        from app.clients.inventory import InsufficientStockError
+
+        self.reserve_calls.append(order_id)
+        if not self.reserve_ok:
+            raise InsufficientStockError({"message": "insufficient stock"})
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -36,11 +67,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 @pytest.fixture(scope="session")
 def database_url() -> Iterator[str]:
-    """A throwaway Postgres, migrated to head, for the whole test session.
-
-    Uses the same image as infra/docker-compose.yml so tests cannot pass
-    against a Postgres version the application never runs on.
-    """
     from testcontainers.community.postgres import PostgresContainer
 
     with PostgresContainer("postgres:16", driver="psycopg2") as container:
@@ -58,6 +84,11 @@ def _upgrade_to_head(url: str) -> None:
 @pytest.fixture(scope="session")
 def engine(database_url: str) -> Iterator[Engine]:
     engine = create_engine(database_url, pool_pre_ping=True)
+    # BackgroundTasks open SessionLocal() directly — bind it to the same
+    # throwaway database the request path uses via get_db override.
+    from app.core.db import SessionLocal
+
+    SessionLocal.configure(bind=engine)
     yield engine
     engine.dispose()
 
@@ -69,7 +100,6 @@ def session_factory(engine: Engine) -> sessionmaker[Session]:
 
 @pytest.fixture(autouse=True)
 def clean_tables(request: pytest.FixtureRequest) -> None:
-    """Start every integration test from an empty orders table."""
     if "engine" not in request.fixturenames:
         return
     engine = request.getfixturevalue("engine")
@@ -78,13 +108,14 @@ def clean_tables(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture
-def client(session_factory: sessionmaker[Session]) -> Iterator[TestClient]:
-    """A test client whose requests hit the throwaway database.
+def fake_inventory() -> FakeInventoryClient:
+    return FakeInventoryClient()
 
-    A fresh Session per request, exactly like production, so tests exercise the
-    real commit path rather than a shared transaction that never commits.
-    """
 
+@pytest.fixture
+def client(
+    session_factory: sessionmaker[Session], fake_inventory: FakeInventoryClient
+) -> Iterator[TestClient]:
     def override_get_db() -> Iterator[Session]:
         db = session_factory()
         try:
@@ -93,6 +124,7 @@ def client(session_factory: sessionmaker[Session]) -> Iterator[TestClient]:
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_inventory_client] = lambda: fake_inventory
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
