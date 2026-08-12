@@ -160,7 +160,7 @@ All routes below are served through the Gateway (`/api/v1/...`), which proxies t
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
 | GET | `/products` | admin | — | `{items: [{id, name, price, stock_qty}]}` |
-| GET | `/products/{id}` | admin | — | product detail + active (`held`) reservations |
+| GET | `/products/{id}` | authenticated | — | catalogue fields; `active_reservations` only included for admin |
 | POST | `/reservations` | authenticated | `{order_id, items: [{product_id, qty}]}` | `201` with held reservations; `409` if stock insufficient |
 | POST | `/reservations/{order_id}/release` | authenticated | — | restores held stock for that order |
 
@@ -405,6 +405,8 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Cursor (keyset) pagination, not offset | Offset pages drift under concurrent inserts; `(created_at, id)` cursors stay stable | ✅ Decided |
 | Inventory reservations use `SELECT ... FOR UPDATE` | Turns concurrent “read stock then write” races into a queue so reserved stock cannot exceed available (FR-2) | ✅ Decided |
 | Reserve/release exposed as HTTP until RabbitMQ exists | Same business logic the future event consumer will call; keeps FR-2 testable before the broker is wired | ✅ Decided |
+| Order create returns `pending` then reserves via BackgroundTasks | Satisfies FR-1 (synchronous order id) without waiting on Inventory locks; failure cancels the order | ✅ Decided |
+| Shoppers may `GET /products/{id}` (not the full list) | Checkout needs price/availability; reservation details stay admin-only | ✅ Decided |
 | Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |
 
 ## 14. Risks

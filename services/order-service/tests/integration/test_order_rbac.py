@@ -32,9 +32,10 @@ def test_admin_list_respects_status_filter(client: TestClient) -> None:
     shopper = auth_header(role=Role.SHOPPER)
     client.post("/orders", json=order_payload(fresh_key()), headers=shopper)
 
-    pending = client.get(
+    # Background reserve moves the order to reserved before this assertion.
+    reserved = client.get(
         "/orders",
-        params={"status": "pending"},
+        params={"status": "reserved"},
         headers=auth_header(role=Role.ADMIN),
     )
     paid = client.get(
@@ -43,8 +44,8 @@ def test_admin_list_respects_status_filter(client: TestClient) -> None:
         headers=auth_header(role=Role.ADMIN),
     )
 
-    assert pending.status_code == 200
-    assert len(pending.json()["items"]) == 1
+    assert reserved.status_code == 200
+    assert len(reserved.json()["items"]) == 1
     assert paid.status_code == 200
     assert paid.json()["items"] == []
 

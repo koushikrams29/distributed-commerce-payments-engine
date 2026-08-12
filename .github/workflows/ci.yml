@@ -35,6 +35,7 @@ jobs:
       DATABASE_URL: postgresql+psycopg2://ci:ci@localhost:5432/ci
       JWT_SECRET: ci-only-test-secret-at-least-32-chars
       SEED_DEV_USERS: "false"
+      INVENTORY_SERVICE_URL: http://inventory.test
 
     steps:
       - uses: actions/checkout@v7
