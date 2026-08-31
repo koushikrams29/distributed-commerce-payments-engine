@@ -9,8 +9,9 @@ class Settings(BaseSettings):
     database_url: str
     jwt_secret: str
     seed_dev_products: bool = False
-    # How long a held reservation stays valid before a reconciler can release it.
     reservation_ttl_minutes: int = 15
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    use_event_bus: bool = True
 
 
 settings = Settings()

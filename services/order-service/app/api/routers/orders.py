@@ -20,6 +20,7 @@ from app.clients.inventory import (
     ProductNotFoundError,
 )
 from app.clients.payment import PaymentClient
+from app.core.config import settings
 from app.core.cursors import CursorError
 from app.core.db import get_db
 from app.core.security import bearer_scheme, get_current_user, require_roles
@@ -74,7 +75,7 @@ def create_order(
 
     if not created:
         response.status_code = status.HTTP_200_OK
-    else:
+    elif not settings.use_event_bus:
         background_tasks.add_task(
             service.reserve_inventory,
             order.id,

@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from commerce_common.auth import AccessTokenPayload, Role
+from commerce_common.events import EventType
 
 from app.clients.inventory import (
     InsufficientStockError,
@@ -13,10 +14,12 @@ from app.clients.inventory import (
     ProductNotFoundError,
 )
 from app.clients.payment import PaymentClient, PaymentUnavailableError
+from app.core.config import settings
 from app.core.cursors import decode_cursor, encode_cursor
 from app.core.db import SessionLocal
-from app.models import Order, OrderItem, OrderStatus
+from app.models import Order, OrderItem, OrderStatus, OutboxEvent
 from app.repositories.order_repository import OrderRepository
+from app.repositories.outbox_repository import OutboxRepository
 from app.schemas.order import OrderCreate, OrderListResponse
 
 
@@ -29,6 +32,7 @@ class OrderService:
     ):
         self.db = db
         self.repository = OrderRepository(db)
+        self.outbox = OutboxRepository(db)
         self.inventory = inventory or InventoryClient()
         self.payment = payment or PaymentClient()
 
@@ -41,8 +45,8 @@ class OrderService:
     ) -> tuple[Order, bool]:
         """Create an order as pending, priced from Inventory.
 
-        Reservation runs after the response (BackgroundTasks) so FR-1 holds:
-        the caller gets an order id without waiting on stock locking.
+        When the event bus is enabled, an outbox row is written in the same
+        transaction so a relay can publish order.created after commit (FR-1).
         """
         existing = self.repository.get_by_idempotency_key(
             user_id=user_id, idempotency_key=payload.idempotency_key
@@ -55,6 +59,8 @@ class OrderService:
 
         try:
             self.repository.add(order)
+            if settings.use_event_bus:
+                self._enqueue_order_created(order)
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
@@ -68,11 +74,41 @@ class OrderService:
         self.db.refresh(order)
         return order, True
 
-    def reserve_inventory(self, order_id: uuid.UUID, *, access_token: str) -> None:
-        """Hold stock for a pending order; mark reserved or cancelled.
+    def on_inventory_reserved(self, order_id: uuid.UUID) -> None:
+        order = self.repository.get_by_id(order_id)
+        if order is None or order.status != OrderStatus.PENDING.value:
+            return
 
-        Safe to call from a background task — opens its own DB session.
-        """
+        order.status = OrderStatus.RESERVED.value
+        if settings.use_event_bus:
+            self._enqueue_charge_requested(order)
+        self.db.commit()
+
+    def on_inventory_failed(self, order_id: uuid.UUID) -> None:
+        order = self.repository.get_by_id(order_id)
+        if order is None or order.status != OrderStatus.PENDING.value:
+            return
+        order.status = OrderStatus.CANCELLED.value
+        self.db.commit()
+
+    def on_payment_succeeded(self, order_id: uuid.UUID) -> None:
+        order = self.repository.get_by_id(order_id)
+        if order is None or order.status != OrderStatus.RESERVED.value:
+            return
+        order.status = OrderStatus.PAID.value
+        self.db.commit()
+
+    def on_payment_failed(self, order_id: uuid.UUID) -> None:
+        order = self.repository.get_by_id(order_id)
+        if order is None or order.status != OrderStatus.RESERVED.value:
+            return
+        order.status = OrderStatus.CANCELLED.value
+        if settings.use_event_bus:
+            self._enqueue_order_cancelled(order)
+        self.db.commit()
+
+    def reserve_inventory(self, order_id: uuid.UUID, *, access_token: str) -> None:
+        """HTTP fallback when USE_EVENT_BUS=false (tests / local without RabbitMQ)."""
         db = SessionLocal()
         try:
             repository = OrderRepository(db)
@@ -93,7 +129,6 @@ class OrderService:
                 db.commit()
                 return
             except InventoryUnavailableError:
-                # Leave pending — a reconciler / retry can pick it up later.
                 return
 
             order.status = OrderStatus.RESERVED.value
@@ -103,7 +138,7 @@ class OrderService:
             db.close()
 
     def charge_payment(self, order_id: uuid.UUID, *, access_token: str) -> None:
-        """Charge a reserved order; mark paid or cancel and release stock (FR-4)."""
+        """HTTP fallback when USE_EVENT_BUS=false."""
         db = SessionLocal()
         try:
             repository = OrderRepository(db)
@@ -166,6 +201,43 @@ class OrderService:
             next_cursor = encode_cursor(rows[-1])
 
         return OrderListResponse(items=rows, next_cursor=next_cursor)
+
+    def _enqueue_order_created(self, order: Order) -> None:
+        self.outbox.add(
+            OutboxEvent(
+                aggregate_id=order.id,
+                event_type=EventType.ORDER_CREATED,
+                payload_json={
+                    "order_id": str(order.id),
+                    "items": [
+                        {"product_id": str(item.product_id), "qty": item.qty}
+                        for item in order.items
+                    ],
+                },
+            )
+        )
+
+    def _enqueue_charge_requested(self, order: Order) -> None:
+        self.outbox.add(
+            OutboxEvent(
+                aggregate_id=order.id,
+                event_type=EventType.CHARGE_REQUESTED,
+                payload_json={
+                    "order_id": str(order.id),
+                    "amount": str(order.total_amount),
+                    "idempotency_key": order.idempotency_key,
+                },
+            )
+        )
+
+    def _enqueue_order_cancelled(self, order: Order) -> None:
+        self.outbox.add(
+            OutboxEvent(
+                aggregate_id=order.id,
+                event_type=EventType.ORDER_CANCELLED,
+                payload_json={"order_id": str(order.id)},
+            )
+        )
 
     def _fetch_prices(
         self, payload: OrderCreate, *, access_token: str

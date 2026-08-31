@@ -10,6 +10,7 @@ os.environ.setdefault(
 )
 os.environ.setdefault("JWT_SECRET", "test-secret-at-least-32-characters-long")
 os.environ.setdefault("SEED_DEV_PRODUCTS", "false")
+os.environ.setdefault("USE_EVENT_BUS", "false")
 
 import pytest
 from alembic import command

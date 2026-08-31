@@ -10,6 +10,7 @@ os.environ.setdefault(
 )
 os.environ.setdefault("JWT_SECRET", "test-secret-at-least-32-characters-long")
 os.environ.setdefault("MOCK_PAYMENT_OUTCOME", "success")
+os.environ.setdefault("USE_EVENT_BUS", "false")
 
 import pytest
 from alembic import command

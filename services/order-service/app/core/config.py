@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     jwt_secret: str
     inventory_service_url: str = "http://127.0.0.1:8002"
     payment_service_url: str = "http://127.0.0.1:8003"
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    use_event_bus: bool = True
 
 
 settings = Settings()

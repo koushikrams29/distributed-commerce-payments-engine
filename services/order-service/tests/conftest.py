@@ -17,6 +17,7 @@ os.environ.setdefault(
 os.environ.setdefault("JWT_SECRET", "test-secret-at-least-32-characters-long")
 os.environ.setdefault("INVENTORY_SERVICE_URL", "http://inventory.test")
 os.environ.setdefault("PAYMENT_SERVICE_URL", "http://payment.test")
+os.environ.setdefault("USE_EVENT_BUS", "false")
 
 import pytest
 from alembic import command
@@ -133,7 +134,7 @@ def clean_tables(request: pytest.FixtureRequest) -> None:
         return
     engine = request.getfixturevalue("engine")
     with engine.begin() as connection:
-        connection.execute(text("TRUNCATE orders CASCADE"))
+        connection.execute(text("TRUNCATE outbox, orders CASCADE"))
 
 
 @pytest.fixture
