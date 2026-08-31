@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.models import OrderStatus
 from app.repositories.order_repository import OrderRepository
 from app.services.order_service import OrderService
-from tests.conftest import FakeInventoryClient
+from tests.conftest import FakeInventoryClient, FakePaymentClient
 from tests.helpers import auth_header, fresh_key, order_payload
 
 
@@ -27,31 +27,37 @@ def test_create_order_uses_inventory_price(
     assert body["items"][0]["unit_price"] == "42.50"
 
 
-def test_background_reserve_marks_order_reserved(
+def test_background_reserve_marks_order_paid(
     client: TestClient,
     session_factory: sessionmaker[Session],
     fake_inventory: FakeInventoryClient,
+    fake_payment: FakePaymentClient,
 ) -> None:
     response = client.post(
         "/orders", json=order_payload(fresh_key()), headers=auth_header()
     )
     order_id = uuid.UUID(response.json()["id"])
 
-    # TestClient runs BackgroundTasks before returning control to us in recent
-    # Starlette versions; if still pending, drive the worker explicitly.
     db = session_factory()
     try:
         order = OrderRepository(db).get_by_id(order_id)
         assert order is not None
-        if order.status == OrderStatus.PENDING.value:
-            OrderService(db, inventory=fake_inventory).reserve_inventory(
-                order_id, access_token="test-token"
+        if order.status != OrderStatus.PAID.value:
+            service = OrderService(
+                db, inventory=fake_inventory, payment=fake_payment
             )
+            if order.status == OrderStatus.PENDING.value:
+                service.reserve_inventory(order_id, access_token="test-token")
             db.expire_all()
             order = OrderRepository(db).get_by_id(order_id)
+            if order is not None and order.status == OrderStatus.RESERVED.value:
+                service.charge_payment(order_id, access_token="test-token")
+                db.expire_all()
+                order = OrderRepository(db).get_by_id(order_id)
         assert order is not None
-        assert order.status == OrderStatus.RESERVED.value
+        assert order.status == OrderStatus.PAID.value
         assert fake_inventory.reserve_calls
+        assert fake_payment.charge_calls
     finally:
         db.close()
 
@@ -60,6 +66,7 @@ def test_failed_reserve_cancels_order(
     client: TestClient,
     session_factory: sessionmaker[Session],
     fake_inventory: FakeInventoryClient,
+    fake_payment: FakePaymentClient,
 ) -> None:
     fake_inventory.reserve_ok = False
     response = client.post(
@@ -72,12 +79,45 @@ def test_failed_reserve_cancels_order(
         order = OrderRepository(db).get_by_id(order_id)
         assert order is not None
         if order.status == OrderStatus.PENDING.value:
-            OrderService(db, inventory=fake_inventory).reserve_inventory(
-                order_id, access_token="test-token"
-            )
+            OrderService(
+                db, inventory=fake_inventory, payment=fake_payment
+            ).reserve_inventory(order_id, access_token="test-token")
             db.expire_all()
             order = OrderRepository(db).get_by_id(order_id)
         assert order is not None
         assert order.status == OrderStatus.CANCELLED.value
+    finally:
+        db.close()
+
+
+def test_failed_payment_cancels_and_releases_stock(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    fake_inventory: FakeInventoryClient,
+    fake_payment: FakePaymentClient,
+) -> None:
+    fake_payment.charge_ok = False
+    response = client.post(
+        "/orders", json=order_payload(fresh_key()), headers=auth_header()
+    )
+    order_id = uuid.UUID(response.json()["id"])
+
+    db = session_factory()
+    try:
+        service = OrderService(db, inventory=fake_inventory, payment=fake_payment)
+        order = OrderRepository(db).get_by_id(order_id)
+        assert order is not None
+        if order.status == OrderStatus.PENDING.value:
+            service.reserve_inventory(order_id, access_token="test-token")
+        db.expire_all()
+        order = OrderRepository(db).get_by_id(order_id)
+        assert order is not None
+        if order.status == OrderStatus.RESERVED.value:
+            service.charge_payment(order_id, access_token="test-token")
+        db.expire_all()
+        order = OrderRepository(db).get_by_id(order_id)
+        assert order is not None
+        assert order.status == OrderStatus.CANCELLED.value
+        assert fake_inventory.release_calls == [order_id]
     finally:
         db.close()

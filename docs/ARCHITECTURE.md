@@ -170,7 +170,10 @@ Until RabbitMQ lands, Order Service (and tests) call reserve/release over HTTP. 
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
+| POST | `/charges` | authenticated | `{order_id, amount, idempotency_key}` | `201` on first charge; `200` when the idempotency key was already used |
 | GET | `/payments/{order_id}` | admin | — | `{payment_id, status, amount, ledger_entries[]}` |
+
+Until RabbitMQ lands, Order Service calls charge over HTTP after inventory reserve succeeds. The mock gateway outcome is controlled by `MOCK_PAYMENT_OUTCOME` (`success` or `failure`).
 
 ### Recommendations (Recommendation Service)
 

@@ -32,22 +32,22 @@ def test_admin_list_respects_status_filter(client: TestClient) -> None:
     shopper = auth_header(role=Role.SHOPPER)
     client.post("/orders", json=order_payload(fresh_key()), headers=shopper)
 
-    # Background reserve moves the order to reserved before this assertion.
-    reserved = client.get(
-        "/orders",
-        params={"status": "reserved"},
-        headers=auth_header(role=Role.ADMIN),
-    )
+    # Background reserve + charge moves the order to paid before this assertion.
     paid = client.get(
         "/orders",
         params={"status": "paid"},
         headers=auth_header(role=Role.ADMIN),
     )
+    reserved = client.get(
+        "/orders",
+        params={"status": "reserved"},
+        headers=auth_header(role=Role.ADMIN),
+    )
 
-    assert reserved.status_code == 200
-    assert len(reserved.json()["items"]) == 1
     assert paid.status_code == 200
-    assert paid.json()["items"] == []
+    assert len(paid.json()["items"]) == 1
+    assert reserved.status_code == 200
+    assert reserved.json()["items"] == []
 
 
 def test_admin_list_rejects_unknown_status(client: TestClient) -> None:

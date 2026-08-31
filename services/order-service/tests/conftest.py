@@ -16,6 +16,7 @@ os.environ.setdefault(
 )
 os.environ.setdefault("JWT_SECRET", "test-secret-at-least-32-characters-long")
 os.environ.setdefault("INVENTORY_SERVICE_URL", "http://inventory.test")
+os.environ.setdefault("PAYMENT_SERVICE_URL", "http://payment.test")
 
 import pytest
 from alembic import command
@@ -24,8 +25,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.routers.orders import get_inventory_client
+from app.api.routers.orders import get_inventory_client, get_payment_client
 from app.clients.inventory import ProductInfo
+from app.clients.payment import ChargeResult
 from app.core.db import get_db
 from app.main import app
 
@@ -39,6 +41,7 @@ class FakeInventoryClient:
         self.price = price
         self.reserve_ok = reserve_ok
         self.reserve_calls: list[uuid.UUID] = []
+        self.release_calls: list[uuid.UUID] = []
 
     def get_product(self, product_id: uuid.UUID, *, access_token: str) -> ProductInfo:
         return ProductInfo(
@@ -56,6 +59,32 @@ class FakeInventoryClient:
         self.reserve_calls.append(order_id)
         if not self.reserve_ok:
             raise InsufficientStockError({"message": "insufficient stock"})
+
+    def release(self, *, order_id: uuid.UUID, access_token: str) -> None:
+        self.release_calls.append(order_id)
+
+
+class FakePaymentClient:
+    def __init__(self, *, charge_ok: bool = True):
+        self.charge_ok = charge_ok
+        self.charge_calls: list[uuid.UUID] = []
+
+    def charge(
+        self,
+        *,
+        order_id: uuid.UUID,
+        amount: Decimal,
+        idempotency_key: str,
+        access_token: str,
+    ) -> ChargeResult:
+        del idempotency_key, access_token
+        self.charge_calls.append(order_id)
+        return ChargeResult(
+            payment_id=uuid.uuid4(),
+            order_id=order_id,
+            status="succeeded" if self.charge_ok else "failed",
+            amount=amount,
+        )
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -113,8 +142,15 @@ def fake_inventory() -> FakeInventoryClient:
 
 
 @pytest.fixture
+def fake_payment() -> FakePaymentClient:
+    return FakePaymentClient()
+
+
+@pytest.fixture
 def client(
-    session_factory: sessionmaker[Session], fake_inventory: FakeInventoryClient
+    session_factory: sessionmaker[Session],
+    fake_inventory: FakeInventoryClient,
+    fake_payment: FakePaymentClient,
 ) -> Iterator[TestClient]:
     def override_get_db() -> Iterator[Session]:
         db = session_factory()
@@ -125,6 +161,7 @@ def client(
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_inventory_client] = lambda: fake_inventory
+    app.dependency_overrides[get_payment_client] = lambda: fake_payment
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

@@ -12,6 +12,7 @@ from app.clients.inventory import (
     InventoryUnavailableError,
     ProductNotFoundError,
 )
+from app.clients.payment import PaymentClient, PaymentUnavailableError
 from app.core.cursors import decode_cursor, encode_cursor
 from app.core.db import SessionLocal
 from app.models import Order, OrderItem, OrderStatus
@@ -21,11 +22,15 @@ from app.schemas.order import OrderCreate, OrderListResponse
 
 class OrderService:
     def __init__(
-        self, db: Session, inventory: InventoryClient | None = None
+        self,
+        db: Session,
+        inventory: InventoryClient | None = None,
+        payment: PaymentClient | None = None,
     ):
         self.db = db
         self.repository = OrderRepository(db)
         self.inventory = inventory or InventoryClient()
+        self.payment = payment or PaymentClient()
 
     def create_order(
         self,
@@ -93,6 +98,42 @@ class OrderService:
 
             order.status = OrderStatus.RESERVED.value
             db.commit()
+            self.charge_payment(order_id, access_token=access_token)
+        finally:
+            db.close()
+
+    def charge_payment(self, order_id: uuid.UUID, *, access_token: str) -> None:
+        """Charge a reserved order; mark paid or cancel and release stock (FR-4)."""
+        db = SessionLocal()
+        try:
+            repository = OrderRepository(db)
+            order = repository.get_by_id(order_id)
+            if order is None or order.status != OrderStatus.RESERVED.value:
+                return
+
+            try:
+                result = self.payment.charge(
+                    order_id=order.id,
+                    amount=order.total_amount,
+                    idempotency_key=order.idempotency_key,
+                    access_token=access_token,
+                )
+            except PaymentUnavailableError:
+                return
+
+            if result.status == "succeeded":
+                order.status = OrderStatus.PAID.value
+                db.commit()
+                return
+
+            order.status = OrderStatus.CANCELLED.value
+            db.commit()
+            try:
+                self.inventory.release(
+                    order_id=order.id, access_token=access_token
+                )
+            except InventoryUnavailableError:
+                return
         finally:
             db.close()
 

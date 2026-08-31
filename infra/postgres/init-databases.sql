@@ -2,3 +2,5 @@
 -- Creates one database per service so cross-service foreign keys are impossible.
 CREATE DATABASE gateway_service;
 CREATE DATABASE inventory_service;
+CREATE DATABASE order_service;
+CREATE DATABASE payment_service;

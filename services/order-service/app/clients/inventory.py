@@ -93,8 +93,21 @@ class InventoryClient:
 
         if response.status_code == 409:
             raise InsufficientStockError(response.json().get("detail"))
-        if response.status_code == 404:
-            raise ProductNotFoundError(uuid.UUID(int=0))  # fallback; detail has id
+        if response.status_code >= 400:
+            raise InventoryUnavailableError(
+                f"inventory returned {response.status_code}"
+            )
+
+    def release(self, *, order_id: uuid.UUID, access_token: str) -> None:
+        try:
+            response = httpx.post(
+                f"{self.base_url}/reservations/{order_id}/release",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=self.timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise InventoryUnavailableError("inventory unreachable") from exc
+
         if response.status_code >= 400:
             raise InventoryUnavailableError(
                 f"inventory returned {response.status_code}"
