@@ -1,0 +1,7 @@
+-e ../../libs/common
+fastapi
+uvicorn[standard]
+pydantic-settings
+sqlalchemy
+psycopg2-binary
+alembic

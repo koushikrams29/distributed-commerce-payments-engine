@@ -23,6 +23,7 @@ jobs:
           - order-service
           - gateway
           - inventory-service
+          - payment-service
 
     defaults:
       run:
@@ -36,6 +37,7 @@ jobs:
       JWT_SECRET: ci-only-test-secret-at-least-32-chars
       SEED_DEV_USERS: "false"
       INVENTORY_SERVICE_URL: http://inventory.test
+      PAYMENT_SERVICE_URL: http://payment.test
 
     steps:
       - uses: actions/checkout@v7

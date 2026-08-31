@@ -19,6 +19,7 @@ from app.clients.inventory import (
     InventoryUnavailableError,
     ProductNotFoundError,
 )
+from app.clients.payment import PaymentClient
 from app.core.cursors import CursorError
 from app.core.db import get_db
 from app.core.security import bearer_scheme, get_current_user, require_roles
@@ -35,6 +36,10 @@ def get_inventory_client() -> InventoryClient:
     return InventoryClient()
 
 
+def get_payment_client() -> PaymentClient:
+    return PaymentClient()
+
+
 @router.post("", response_model=OrderRead, status_code=status.HTTP_201_CREATED)
 def create_order(
     payload: OrderCreate,
@@ -46,9 +51,10 @@ def create_order(
     ),
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     inventory: InventoryClient = Depends(get_inventory_client),
+    payment: PaymentClient = Depends(get_payment_client),
 ):
     """Create pending order, then reserve stock in the background (FR-1)."""
-    service = OrderService(db, inventory=inventory)
+    service = OrderService(db, inventory=inventory, payment=payment)
     try:
         order, created = service.create_order(
             payload,
