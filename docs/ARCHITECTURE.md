@@ -164,7 +164,7 @@ All routes below are served through the Gateway (`/api/v1/...`), which proxies t
 | POST | `/reservations` | authenticated | `{order_id, items: [{product_id, qty}]}` | `201` with held reservations; `409` if stock insufficient |
 | POST | `/reservations/{order_id}/release` | authenticated | — | restores held stock for that order |
 
-Until RabbitMQ lands, Order Service (and tests) call reserve/release over HTTP. The locking semantics are the same ones the future `order.created` consumer will use.
+Until RabbitMQ lands, Order Service (and tests) call reserve/release over HTTP. With `USE_EVENT_BUS=true`, reservation and payment run via RabbitMQ events instead; HTTP endpoints remain for direct calls and tests.
 
 ### Payments (Payment Service)
 
@@ -173,7 +173,7 @@ Until RabbitMQ lands, Order Service (and tests) call reserve/release over HTTP. 
 | POST | `/charges` | authenticated | `{order_id, amount, idempotency_key}` | `201` on first charge; `200` when the idempotency key was already used |
 | GET | `/payments/{order_id}` | admin | — | `{payment_id, status, amount, ledger_entries[]}` |
 
-Until RabbitMQ lands, Order Service calls charge over HTTP after inventory reserve succeeds. The mock gateway outcome is controlled by `MOCK_PAYMENT_OUTCOME` (`success` or `failure`).
+With `USE_EVENT_BUS=true`, Order Service writes `order.created` and `charge.requested` to the outbox (same DB transaction), a relay publishes to RabbitMQ, and Inventory/Payment consumers handle reserve/charge. Set `USE_EVENT_BUS=false` to fall back to HTTP `BackgroundTasks` (used in CI).
 
 ### Recommendations (Recommendation Service)
 
@@ -407,7 +407,7 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | `GET /orders` is admin-only; shoppers use `GET /orders/{id}` for their own | Listing every order is an operations concern; shoppers must not enumerate the table | ✅ Decided |
 | Cursor (keyset) pagination, not offset | Offset pages drift under concurrent inserts; `(created_at, id)` cursors stay stable | ✅ Decided |
 | Inventory reservations use `SELECT ... FOR UPDATE` | Turns concurrent “read stock then write” races into a queue so reserved stock cannot exceed available (FR-2) | ✅ Decided |
-| Reserve/release exposed as HTTP until RabbitMQ exists | Same business logic the future event consumer will call; keeps FR-2 testable before the broker is wired | ✅ Decided |
+| Reserve/release via HTTP or RabbitMQ (`USE_EVENT_BUS`) | HTTP path keeps CI simple; event path uses outbox + consumers for the saga | ✅ Decided |
 | Order create returns `pending` then reserves via BackgroundTasks | Satisfies FR-1 (synchronous order id) without waiting on Inventory locks; failure cancels the order | ✅ Decided |
 | Shoppers may `GET /products/{id}` (not the full list) | Checkout needs price/availability; reservation details stay admin-only | ✅ Decided |
 | Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |

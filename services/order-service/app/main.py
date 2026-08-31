@@ -1,11 +1,25 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.routers import orders
+from app.core.config import settings
 from app.core.db import get_db
+from app.events.consumers import start_order_event_consumers
+from app.events.outbox_relay import start_outbox_relay
 
-app = FastAPI(title="Order Service", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if settings.use_event_bus:
+        start_outbox_relay()
+        start_order_event_consumers()
+    yield
+
+
+app = FastAPI(title="Order Service", version="0.1.0", lifespan=lifespan)
 
 app.include_router(orders.router)
 

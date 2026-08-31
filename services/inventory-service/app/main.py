@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.routers import products, reservations
 from app.core.config import settings
 from app.core.db import SessionLocal, get_db
+from app.events.consumers import start_inventory_event_consumers
 from app.services.inventory_service import InventoryService
 
 # Fixed IDs so local demos and Order Service tests can target known products.
@@ -56,6 +57,8 @@ def _seed_dev_products() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _seed_dev_products()
+    if settings.use_event_bus:
+        start_inventory_event_consumers()
     yield
 
 

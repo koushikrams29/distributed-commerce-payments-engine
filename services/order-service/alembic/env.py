@@ -7,7 +7,7 @@ from alembic import context
 
 from app.core.db import Base
 from app.core.config import settings
-from app.models import Order, OrderItem # noqa: F401 - registers models on Base
+from app.models import Order, OrderItem, OutboxEvent  # noqa: F401 - registers models on Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

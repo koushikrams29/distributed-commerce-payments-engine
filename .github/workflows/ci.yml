@@ -38,6 +38,7 @@ jobs:
       SEED_DEV_USERS: "false"
       INVENTORY_SERVICE_URL: http://inventory.test
       PAYMENT_SERVICE_URL: http://payment.test
+      USE_EVENT_BUS: "false"
 
     steps:
       - uses: actions/checkout@v7
