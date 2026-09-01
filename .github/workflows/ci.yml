@@ -24,6 +24,7 @@ jobs:
           - gateway
           - inventory-service
           - payment-service
+          - notification-service
 
     defaults:
       run:
