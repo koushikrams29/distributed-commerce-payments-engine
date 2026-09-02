@@ -25,6 +25,7 @@ jobs:
           - inventory-service
           - payment-service
           - notification-service
+          - recommendation-service
 
     defaults:
       run:
