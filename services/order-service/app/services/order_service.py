@@ -226,6 +226,10 @@ class OrderService:
                     "order_id": str(order.id),
                     "amount": str(order.total_amount),
                     "idempotency_key": order.idempotency_key,
+                    "items": [
+                        {"product_id": str(item.product_id), "qty": item.qty}
+                        for item in order.items
+                    ],
                 },
             )
         )

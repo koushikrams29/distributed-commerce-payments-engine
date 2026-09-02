@@ -27,14 +27,17 @@ def _handle_charge_requested(_routing_key: str, payload: dict[str, Any]) -> None
             idempotency_key=idempotency_key,
         )
         if payment.status == PaymentStatus.SUCCEEDED.value:
+            event_payload = {
+                "order_id": str(order_id),
+                "payment_id": str(payment.id),
+                "amount": str(payment.amount),
+            }
+            if payload.get("items"):
+                event_payload["items"] = payload["items"]
             publish_event(
                 settings.rabbitmq_url,
                 EventType.PAYMENT_SUCCEEDED,
-                {
-                    "order_id": str(order_id),
-                    "payment_id": str(payment.id),
-                    "amount": str(payment.amount),
-                },
+                event_payload,
             )
         else:
             publish_event(

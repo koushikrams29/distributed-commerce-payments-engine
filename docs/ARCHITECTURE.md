@@ -187,7 +187,9 @@ Consumer-only — no public write API. Listens for `payment.succeeded` on Rabbit
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
-| GET | `/recommendations/{product_id}` | admin | — | top co-purchased products |
+| GET | `/recommendations/{product_id}` | admin | query: `limit` | `{product_id, items: [{product_id, co_purchase_count}]}` |
+
+Consumes `payment.succeeded` (with `items[]` in the payload) and increments pairwise co-purchase counts. Idempotent per `order_id`.
 
 ### Health (every service)
 
@@ -202,7 +204,7 @@ Consumer-only — no public write API. Listens for `payment.succeeded` on Rabbit
 | `order.created` | Order Service | Inventory Service | `order_id, items[]` |
 | `inventory.reserved` / `inventory.failed` | Inventory Service | Order Service | `order_id, reservation_id` |
 | `charge.requested` | Order Service | Payment Service | `order_id, amount, idempotency_key` |
-| `payment.succeeded` / `payment.failed` | Payment Service | Order, Notification, Recommendation | `order_id, payment_id, amount` |
+| `payment.succeeded` / `payment.failed` | Payment Service | Order, Notification, Recommendation | `order_id, payment_id, amount, items[]` (items on success only) |
 | `order.cancelled` | Order Service | Inventory Service | `order_id` (triggers release) |
 
 ### 📘 Concept — Saga orchestration
