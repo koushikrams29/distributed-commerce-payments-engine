@@ -99,9 +99,17 @@ class InventoryClient:
             )
 
     def release(self, *, order_id: uuid.UUID, access_token: str) -> None:
+        self._post_reservation_action(order_id, "release", access_token)
+
+    def commit(self, *, order_id: uuid.UUID, access_token: str) -> None:
+        self._post_reservation_action(order_id, "commit", access_token)
+
+    def _post_reservation_action(
+        self, order_id: uuid.UUID, action: str, access_token: str
+    ) -> None:
         try:
             response = httpx.post(
-                f"{self.base_url}/reservations/{order_id}/release",
+                f"{self.base_url}/reservations/{order_id}/{action}",
                 headers={"Authorization": f"Bearer {access_token}"},
                 timeout=self.timeout,
             )

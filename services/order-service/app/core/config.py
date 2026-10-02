@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     reconcile_enabled: bool = True
     reconcile_pending_after_minutes: int = 30
     reconcile_reserved_after_minutes: int = 30
+    reconcile_paid_after_minutes: int = 10
     reconcile_poll_interval_seconds: float = 60.0
 
 

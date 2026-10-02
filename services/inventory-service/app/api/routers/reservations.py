@@ -56,3 +56,13 @@ def release_stock(
 ):
     released = InventoryService(db).release_for_order(order_id)
     return {"order_id": str(order_id), "released_count": released}
+
+
+@router.post("/{order_id}/commit", status_code=status.HTTP_200_OK)
+def commit_stock(
+    order_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: AccessTokenPayload = Depends(get_current_user),
+):
+    committed = InventoryService(db).commit_for_order(order_id)
+    return {"order_id": str(order_id), "committed_count": committed}

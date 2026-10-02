@@ -19,8 +19,7 @@ def test_send_order_confirmation_persists_notification(
     db = session_factory()
     try:
         notification, created = NotificationService(db).send_order_confirmation(
-            order_id=order_id,
-            payment_id=uuid.uuid4(),
+            order_id=order_id
         )
         assert created is True
         assert notification.status == NotificationStatus.SENT.value

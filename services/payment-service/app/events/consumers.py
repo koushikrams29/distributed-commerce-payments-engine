@@ -53,10 +53,38 @@ def _handle_charge_requested(_routing_key: str, payload: dict[str, Any]) -> None
         db.close()
 
 
+def _handle_refund_requested(_routing_key: str, payload: dict[str, Any]) -> None:
+    order_id = uuid.UUID(payload["order_id"])
+    db = SessionLocal()
+    try:
+        refunded = PaymentService(db).refund_for_order(order_id)
+        for payment in refunded:
+            publish_event(
+                settings.rabbitmq_url,
+                EventType.PAYMENT_REFUNDED,
+                {
+                    "order_id": str(order_id),
+                    "payment_id": str(payment.id),
+                    "amount": str(payment.amount),
+                },
+            )
+    finally:
+        db.close()
+
+
 def start_payment_event_consumers() -> None:
     run_consumer(
         url=settings.rabbitmq_url,
         queue_name="payment.events",
-        routing_keys=[EventType.CHARGE_REQUESTED],
-        handler=_handle_charge_requested,
+        routing_keys=[EventType.CHARGE_REQUESTED, EventType.REFUND_REQUESTED],
+        handler=_dispatch,
     )
+
+
+def _dispatch(routing_key: str, payload: dict[str, Any]) -> None:
+    if routing_key == EventType.CHARGE_REQUESTED:
+        _handle_charge_requested(routing_key, payload)
+    elif routing_key == EventType.REFUND_REQUESTED:
+        _handle_refund_requested(routing_key, payload)
+    else:
+        logger.warning("ignored unknown inbound event: %s", routing_key)

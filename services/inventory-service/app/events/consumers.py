@@ -55,11 +55,32 @@ def _handle_order_cancelled(_routing_key: str, payload: dict[str, Any]) -> None:
         db.close()
 
 
+def _handle_order_paid(_routing_key: str, payload: dict[str, Any]) -> None:
+    order_id = uuid.UUID(payload["order_id"])
+    db = SessionLocal()
+    try:
+        committed = InventoryService(db).commit_for_order(order_id)
+    finally:
+        db.close()
+    # Published even when nothing was left to commit: on a redelivered
+    # order.paid the first attempt already committed, and the order still
+    # needs this signal to reach fulfilled.
+    publish_event(
+        settings.rabbitmq_url,
+        EventType.INVENTORY_COMMITTED,
+        {"order_id": str(order_id), "committed_count": committed},
+    )
+
+
 def start_inventory_event_consumers() -> None:
     run_consumer(
         url=settings.rabbitmq_url,
         queue_name="inventory.events",
-        routing_keys=[EventType.ORDER_CREATED, EventType.ORDER_CANCELLED],
+        routing_keys=[
+            EventType.ORDER_CREATED,
+            EventType.ORDER_CANCELLED,
+            EventType.ORDER_PAID,
+        ],
         handler=_dispatch,
     )
 
@@ -69,5 +90,7 @@ def _dispatch(routing_key: str, payload: dict[str, Any]) -> None:
         _handle_order_created(routing_key, payload)
     elif routing_key == EventType.ORDER_CANCELLED:
         _handle_order_cancelled(routing_key, payload)
+    elif routing_key == EventType.ORDER_PAID:
+        _handle_order_paid(routing_key, payload)
     else:
         logger.warning("ignored unknown inbound event: %s", routing_key)

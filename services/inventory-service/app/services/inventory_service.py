@@ -54,9 +54,11 @@ class InventoryService:
         Each product row is locked with SELECT ... FOR UPDATE so two concurrent
         reservations cannot both decide the same unit is available (FR-2).
         """
-        existing = self.reservations.list_held_for_order(order_id)
+        existing = self.reservations.list_for_order(order_id)
         if existing:
-            # Idempotent: replaying the same order_id returns the held rows.
+            # Idempotent: a replayed order_id returns its rows whatever their
+            # status. Checking only held rows would re-deduct stock for an
+            # order that was already committed or released.
             return existing
 
         # Lock products in a stable order to avoid deadlocks between requests
@@ -94,10 +96,26 @@ class InventoryService:
             self.db.refresh(reservation)
         return created
 
+    def commit_for_order(self, order_id: uuid.UUID) -> int:
+        """Make held stock permanent once the order is paid.
+
+        Stock was already deducted at reservation time, so committing only
+        flips the status — but that is what stops a later release from
+        handing paid-for units back to the shelf.
+        """
+        held = self.reservations.list_held_for_order(order_id, for_update=True)
+        for reservation in held:
+            reservation.status = ReservationStatus.COMMITTED.value
+        self.db.commit()
+        return len(held)
+
     def release_for_order(self, order_id: uuid.UUID) -> int:
         """Return held stock for an order (payment failure / cancel)."""
-        held = self.reservations.list_held_for_order(order_id)
+        # Row locks serialise this against commit_for_order for the same order:
+        # whichever runs second sees no held rows and does nothing.
+        held = self.reservations.list_held_for_order(order_id, for_update=True)
         if not held:
+            self.db.rollback()
             return 0
 
         # Lock products before restoring qty.

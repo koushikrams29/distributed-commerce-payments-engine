@@ -27,7 +27,7 @@ def test_create_order_uses_inventory_price(
     assert body["items"][0]["unit_price"] == "42.50"
 
 
-def test_background_reserve_marks_order_paid(
+def test_background_flow_reserves_charges_and_fulfils(
     client: TestClient,
     session_factory: sessionmaker[Session],
     fake_inventory: FakeInventoryClient,
@@ -42,22 +42,36 @@ def test_background_reserve_marks_order_paid(
     try:
         order = OrderRepository(db).get_by_id(order_id)
         assert order is not None
-        if order.status != OrderStatus.PAID.value:
-            service = OrderService(
-                db, inventory=fake_inventory, payment=fake_payment
-            )
-            if order.status == OrderStatus.PENDING.value:
-                service.reserve_inventory(order_id, access_token="test-token")
-            db.expire_all()
-            order = OrderRepository(db).get_by_id(order_id)
-            if order is not None and order.status == OrderStatus.RESERVED.value:
-                service.charge_payment(order_id, access_token="test-token")
-                db.expire_all()
-                order = OrderRepository(db).get_by_id(order_id)
+        assert order.status == OrderStatus.FULFILLED.value
+        assert fake_inventory.reserve_calls == [order_id]
+        assert fake_payment.charge_calls == [order_id]
+        assert fake_inventory.commit_calls == [order_id]
+    finally:
+        db.close()
+
+
+def test_order_stays_paid_when_inventory_commit_is_unreachable(
+    session_factory: sessionmaker[Session],
+    fake_inventory: FakeInventoryClient,
+    fake_payment: FakePaymentClient,
+    client: TestClient,
+) -> None:
+    from app.clients.inventory import InventoryUnavailableError
+
+    def unreachable(*, order_id: uuid.UUID, access_token: str) -> None:
+        raise InventoryUnavailableError("down")
+
+    fake_inventory.commit = unreachable  # type: ignore[method-assign]
+    response = client.post(
+        "/orders", json=order_payload(fresh_key()), headers=auth_header()
+    )
+    order_id = uuid.UUID(response.json()["id"])
+
+    db = session_factory()
+    try:
+        order = OrderRepository(db).get_by_id(order_id)
         assert order is not None
         assert order.status == OrderStatus.PAID.value
-        assert fake_inventory.reserve_calls
-        assert fake_payment.charge_calls
     finally:
         db.close()
 

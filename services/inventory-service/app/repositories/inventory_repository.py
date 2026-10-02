@@ -45,11 +45,19 @@ class ReservationRepository:
         self.db.flush()
         return reservation
 
-    def list_held_for_order(self, order_id: uuid.UUID) -> list[StockReservation]:
+    def list_held_for_order(
+        self, order_id: uuid.UUID, *, for_update: bool = False
+    ) -> list[StockReservation]:
         stmt = select(StockReservation).where(
             StockReservation.order_id == order_id,
             StockReservation.status == ReservationStatus.HELD.value,
         )
+        if for_update:
+            stmt = stmt.with_for_update()
+        return list(self.db.execute(stmt).scalars().all())
+
+    def list_for_order(self, order_id: uuid.UUID) -> list[StockReservation]:
+        stmt = select(StockReservation).where(StockReservation.order_id == order_id)
         return list(self.db.execute(stmt).scalars().all())
 
     def list_held_for_product(self, product_id: uuid.UUID) -> list[StockReservation]:
