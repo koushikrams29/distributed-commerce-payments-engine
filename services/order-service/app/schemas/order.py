@@ -38,6 +38,7 @@ class OrderRead(BaseModel):
     status: str
     total_amount: Decimal
     created_at: datetime
+    updated_at: datetime
     items: list[OrderItemRead]
 
 

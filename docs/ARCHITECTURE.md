@@ -154,7 +154,25 @@ Responses carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`; a rejected requ
 |---|---|---|---|---|
 | POST | `/api/v1/auth/login` | none | `{email, password}` | `{access_token, refresh_token}` |
 | POST | `/api/v1/auth/refresh` | refresh token | `{refresh_token}` | `{access_token}` |
-| WS | `/ws/dashboard` | admin JWT | — | stream of order/inventory/payment events |
+| WS | `/ws/dashboard` | admin JWT (first frame) | see below | live stream of every bus event |
+
+### Live dashboard (FR-6)
+
+Each Gateway instance consumes every routing key (`#`) on its own private, auto-deleted RabbitMQ queue, so every instance sees every event and can serve any connected admin. An in-memory hub copies each event to every open socket on that instance.
+
+| Step | Direction | Frame |
+|---|---|---|
+| 1 | client → server | `{"type": "auth", "token": "<access JWT>"}` — must arrive within `DASHBOARD_AUTH_TIMEOUT_SECONDS` (5) |
+| 2 | server → client | `{"type": "ready"}` — client should now load its snapshot (`GET /api/v1/orders`, `/products`) |
+| 3+ | server → client | `{"type": "<routing key>", "data": {...event payload}, "received_at": "<ISO time>"}` |
+
+| Close code | Meaning | Client should |
+|---|---|---|
+| `4401` | missing/invalid/expired token, or no auth frame in time; also sent when the token expires mid-stream | refresh the token, reconnect |
+| `4403` | valid token, not an admin | stop |
+| `1013` | client fell more than 256 events behind and was dropped | reconnect and reload the snapshot |
+
+The token is sent in the first frame rather than the URL so it never appears in proxy or access logs. Events are not replayed: the stream is a live view, and the client resynchronises from the REST snapshot after every (re)connect. The dashboard merges snapshot and live updates by lifecycle position (`pending` < `reserved` < `paid` < `fulfilled`/`cancelled`), which is correct regardless of arrival order because statuses only move forward. If RabbitMQ restarts, the consumer reconnects every 5 s. The React client lives in `frontend/` (see §8). Set `CORS_ALLOWED_ORIGINS` only when the dashboard is hosted on a different origin than the Gateway.
 
 ### Orders (Order Service)
 
@@ -237,6 +255,13 @@ Consumes `payment.succeeded` (with `items[]` in the payload) and increments pair
 | `order.fulfilled` | Order Service | Notification Service | `order_id, user_id, total_amount` |
 | `refund.requested` | Order Service | Payment Service | `order_id` |
 | `payment.refunded` | Payment Service | — (audit) | `order_id, payment_id, amount` |
+| `order.status_changed` | Order Service | Gateway (dashboard) | `order_id, user_id, status, previous_status, total_amount, occurred_at` — one per transition, including creation (`previous_status: null`) |
+
+The Gateway's dashboard relay consumes every event above (`#`), not just `order.status_changed`, to show the full saga in the live feed. `order.status_changed` exists so the dashboard never has to infer an order's status from the saga's internal events.
+
+### 📘 Concept — WebSocket fan-out and backpressure
+
+HTTP is request → response: the server can only speak when asked. A **WebSocket** upgrades one HTTP connection into a long-lived two-way channel, so the server can push an event the moment it happens instead of the browser polling every few seconds. **Fan-out** means one incoming event is copied to many receivers — here, RabbitMQ fans out to every Gateway instance (one private queue each), and each Gateway fans out to every admin socket it holds. **Backpressure** is what happens when a receiver is slower than the sender: something has to give. Buffering forever eventually exhausts memory, and blocking would let one slow laptop stall every other admin, so each socket gets a bounded queue and a client that falls too far behind is disconnected (`1013`) and told to resync.
 
 ### 📘 Concept — Saga orchestration
 
@@ -379,6 +404,8 @@ This is what separates a "mature" codebase from a fresher one: **routers never c
 
 `infra/docker-compose.yml` brings up: `postgres`, `redis`, `rabbitmq`, `otel-collector`, `prometheus`, `grafana`, plus one container per service in `services/`, plus the `frontend`. Single command: `docker-compose up --build` from `infra/`. Exact service names/ports get filled in here once the compose file exists.
 
+**Admin dashboard:** `cd frontend && npm install && npm run dev`, then open http://localhost:5173 and sign in as an admin. The Vite dev server proxies `/api` and `/ws` to the Gateway on port 8001 (override with `GATEWAY_URL`), so the browser sees one origin and no CORS setup is needed. `npm test` runs the Vitest suite; `npm run build` type-checks and produces `frontend/dist/`.
+
 ## 9. Deployment architecture
 
 - Each service is its own Docker image, deployed as an independent Render/Railway service. Notification and Recommendation are consumer-only (no public traffic needed beyond a `/health` check).
@@ -460,6 +487,11 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | A charge that succeeds after cancellation is refunded, not resurrected | The stock may already be resold; reversing the money is the only compensation that is always safe | ✅ Decided |
 | The reconciler never cancels a `paid` order | Money has moved; the safe recovery is to retry the stalled step, not to undo the payment | ✅ Decided |
 | Status changes lock the order row | Event handlers and the reconciler run concurrently; without the lock the last writer wins and the saga can end in a contradictory state | ✅ Decided |
+| Dashboard events via a per-instance private queue, not the shared work queues | Work queues deliver each message to one consumer; a live view needs every Gateway instance to see every event, and a queue that dies with the instance leaves nothing to clean up | ✅ Decided |
+| WebSocket token in the first frame, not the query string | Query strings end up in access logs and browser history; a first-frame token stays inside the encrypted channel | ✅ Decided |
+| Slow dashboard clients are disconnected, not buffered | A bounded queue per socket caps Gateway memory and stops one slow client from delaying the rest; the client reloads the snapshot on reconnect | ✅ Decided |
+| Dashboard merges by lifecycle position, not timestamp | Statuses only move forward, so "further along wins" is correct in any arrival order and avoids comparing clocks from different services | ✅ Decided |
+| Explicit `order.status_changed` event | Lets read-side consumers follow order status without knowing which saga events cause which transitions | ✅ Decided |
 | Mocked payment gateway interface shape | `charge(amount) -> bool`, `refund(amount)` | ✅ Decided |
 
 ## 14. Risks

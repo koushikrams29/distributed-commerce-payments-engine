@@ -16,3 +16,4 @@ class EventType:
     ORDER_FULFILLED = "order.fulfilled"
     REFUND_REQUESTED = "refund.requested"
     PAYMENT_REFUNDED = "payment.refunded"
+    ORDER_STATUS_CHANGED = "order.status_changed"

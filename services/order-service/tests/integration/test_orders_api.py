@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
@@ -37,6 +38,23 @@ def test_a_created_order_can_be_read_back(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json()["id"] == created["id"]
     assert response.json()["user_id"] == str(user_id)
+
+
+def test_updated_at_tracks_the_latest_status_change(client: TestClient) -> None:
+    headers = auth_header()
+    created = client.post(
+        "/orders", json=order_payload(fresh_key()), headers=headers
+    ).json()
+
+    # The HTTP fallback runs reserve → charge → fulfil after the response.
+    current = client.get(f"/orders/{created['id']}", headers=headers).json()
+
+    assert created["status"] == "pending"
+    assert current["status"] == "fulfilled"
+    assert datetime.fromisoformat(current["updated_at"]) > datetime.fromisoformat(
+        created["updated_at"]
+    )
+    assert current["created_at"] == created["created_at"]
 
 
 def test_a_shopper_cannot_read_another_users_order(client: TestClient) -> None:

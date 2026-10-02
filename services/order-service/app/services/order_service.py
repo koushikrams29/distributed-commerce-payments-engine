@@ -62,6 +62,7 @@ class OrderService:
             self.repository.add(order)
             if settings.use_event_bus:
                 self._enqueue_order_created(order)
+                self._enqueue_status_changed(order, previous_status=None)
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
@@ -93,7 +94,7 @@ class OrderService:
             self.db.rollback()
             return
 
-        order.status = OrderStatus.RESERVED.value
+        self._set_status(order, OrderStatus.RESERVED)
         if settings.use_event_bus:
             self._enqueue_charge_requested(order)
         self.db.commit()
@@ -103,7 +104,7 @@ class OrderService:
         if order is None or order.status != OrderStatus.PENDING.value:
             self.db.rollback()
             return
-        order.status = OrderStatus.CANCELLED.value
+        self._set_status(order, OrderStatus.CANCELLED)
         self.db.commit()
 
     def on_payment_succeeded(self, order_id: uuid.UUID) -> None:
@@ -121,7 +122,7 @@ class OrderService:
             self.db.rollback()
             return
 
-        order.status = OrderStatus.PAID.value
+        self._set_status(order, OrderStatus.PAID)
         if settings.use_event_bus:
             self._enqueue_order_paid(order)
         self.db.commit()
@@ -131,7 +132,7 @@ class OrderService:
         if order is None or order.status != OrderStatus.RESERVED.value:
             self.db.rollback()
             return
-        order.status = OrderStatus.CANCELLED.value
+        self._set_status(order, OrderStatus.CANCELLED)
         if settings.use_event_bus:
             self._enqueue_order_cancelled(order)
         self.db.commit()
@@ -141,7 +142,7 @@ class OrderService:
         if order is None or order.status != OrderStatus.PAID.value:
             self.db.rollback()
             return
-        order.status = OrderStatus.FULFILLED.value
+        self._set_status(order, OrderStatus.FULFILLED)
         if settings.use_event_bus:
             self._enqueue_order_fulfilled(order)
         self.db.commit()
@@ -167,7 +168,7 @@ class OrderService:
         for order in self.repository.list_stuck_orders(
             status=OrderStatus.PENDING.value, created_before=pending_before
         ):
-            order.status = OrderStatus.CANCELLED.value
+            self._set_status(order, OrderStatus.CANCELLED)
             if settings.use_event_bus:
                 # Inventory may still reserve for this order; releasing is a
                 # no-op if it never did.
@@ -177,7 +178,7 @@ class OrderService:
         for order in self.repository.list_stuck_orders(
             status=OrderStatus.RESERVED.value, created_before=reserved_before
         ):
-            order.status = OrderStatus.CANCELLED.value
+            self._set_status(order, OrderStatus.CANCELLED)
             if settings.use_event_bus:
                 self._enqueue_order_cancelled(order)
             acted_on += 1
@@ -342,6 +343,32 @@ class OrderService:
             EventType.ORDER_FULFILLED,
             user_id=str(order.user_id),
             total_amount=str(order.total_amount),
+        )
+
+    def _set_status(self, order: Order, status: OrderStatus) -> None:
+        """The single place event-driven code changes status, so every
+        transition reaches the live dashboard (FR-6)."""
+        previous = order.status
+        order.status = status.value
+        if settings.use_event_bus:
+            self._enqueue_status_changed(order, previous_status=previous)
+
+    def _enqueue_status_changed(
+        self, order: Order, *, previous_status: str | None
+    ) -> None:
+        self.outbox.add(
+            OutboxEvent(
+                aggregate_id=order.id,
+                event_type=EventType.ORDER_STATUS_CHANGED,
+                payload_json={
+                    "order_id": str(order.id),
+                    "user_id": str(order.user_id),
+                    "status": order.status,
+                    "previous_status": previous_status,
+                    "total_amount": str(order.total_amount),
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                },
+            )
         )
 
     def _enqueue(self, order: Order, event_type: str, **extra: str) -> None:
