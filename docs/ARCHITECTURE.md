@@ -164,9 +164,10 @@ The Gateway (port 8001) maps the first path segment to a service: `orders` → O
 | GET | `/products` | admin | — | `{items: [{id, name, price, stock_qty}]}` |
 | GET | `/products/{id}` | authenticated | — | catalogue fields; `active_reservations` only included for admin |
 | POST | `/reservations` | authenticated | `{order_id, items: [{product_id, qty}]}` | `201` with held reservations; `409` if stock insufficient |
-| POST | `/reservations/{order_id}/release` | authenticated | — | restores held stock for that order |
+| POST | `/reservations/{order_id}/release` | authenticated | — | restores held stock for that order; no-op once committed |
+| POST | `/reservations/{order_id}/commit` | authenticated | — | marks held stock `committed` (paid for, never released); idempotent |
 
-Until RabbitMQ lands, Order Service (and tests) call reserve/release over HTTP. With `USE_EVENT_BUS=true`, reservation and payment run via RabbitMQ events instead; HTTP endpoints remain for direct calls and tests.
+With `USE_EVENT_BUS=true`, reserve, commit and release run via RabbitMQ events; with `USE_EVENT_BUS=false` (CI), Order Service calls these HTTP endpoints directly. Reservation rows are locked during commit and release, so the two cannot both succeed for one order. A replayed reservation for an order that already has reservations — in any status — returns the existing rows instead of deducting stock again.
 
 ### Payments (Payment Service)
 
@@ -177,11 +178,23 @@ Until RabbitMQ lands, Order Service (and tests) call reserve/release over HTTP. 
 
 With `USE_EVENT_BUS=true`, Order Service writes `order.created` and `charge.requested` to the outbox (same DB transaction), a relay publishes to RabbitMQ, and Inventory/Payment consumers handle reserve/charge. Set `USE_EVENT_BUS=false` to fall back to HTTP `BackgroundTasks` (used in CI).
 
-A background **reconciler** (FR-5) polls for orders stuck in `pending` or `reserved` longer than `RECONCILE_*_AFTER_MINUTES` and cancels them; reserved orders also get an `order.cancelled` outbox row so Inventory releases stock.
+After a successful charge the order becomes `paid` and emits `order.paid`; Inventory commits the reservation and replies `inventory.committed`; the order becomes `fulfilled` and emits `order.fulfilled`. Every status change locks the order row first (`SELECT ... FOR UPDATE`), so two events — or an event and the reconciler — never act on the same old status.
+
+If `payment.succeeded` arrives for an order that is already `cancelled` (the reconciler gave up first and released the stock), Order Service emits `refund.requested`; Payment Service marks the payment `refunded`, writes a `credit` ledger entry and emits `payment.refunded`. Refunds lock the payment rows, so a redelivered request cannot credit twice.
+
+A background **reconciler** (FR-5) moves every order toward a terminal status:
+
+| Stuck in | After | Action |
+|---|---|---|
+| `pending` | `RECONCILE_PENDING_AFTER_MINUTES` (30) since creation | cancel + `order.cancelled` (release is a no-op if nothing was held) |
+| `reserved` | `RECONCILE_RESERVED_AFTER_MINUTES` (30) since creation | cancel + `order.cancelled` |
+| `paid` | `RECONCILE_PAID_AFTER_MINUTES` (10) since last update | never cancelled — money was taken; re-send `order.paid` and restart the timer |
+
+The reconciler selects with `FOR UPDATE SKIP LOCKED`, skipping any order an event handler is changing at that moment.
 
 ### Notifications (Notification Service)
 
-Consumer-only — no public write API. Listens for `payment.succeeded` on RabbitMQ, records a fake email confirmation in `notifications` (FR-8). Exposes `/health` only.
+Consumer-only — no public write API. Listens for `order.fulfilled` on RabbitMQ and records a fake email confirmation in `notifications` (FR-8), idempotent per `(order_id, channel)`. Exposes `/health` only.
 
 | Method | Path | Auth | Response |
 |---|---|---|---|
@@ -208,8 +221,13 @@ Consumes `payment.succeeded` (with `items[]` in the payload) and increments pair
 | `order.created` | Order Service | Inventory Service | `order_id, items[]` |
 | `inventory.reserved` / `inventory.failed` | Inventory Service | Order Service | `order_id, reservation_id` |
 | `charge.requested` | Order Service | Payment Service | `order_id, amount, idempotency_key` |
-| `payment.succeeded` / `payment.failed` | Payment Service | Order, Notification, Recommendation | `order_id, payment_id, amount, items[]` (items on success only) |
+| `payment.succeeded` / `payment.failed` | Payment Service | Order, Recommendation | `order_id, payment_id, amount, items[]` (items on success only) |
 | `order.cancelled` | Order Service | Inventory Service | `order_id` (triggers release) |
+| `order.paid` | Order Service | Inventory Service | `order_id` (triggers commit) |
+| `inventory.committed` | Inventory Service | Order Service | `order_id, committed_count` |
+| `order.fulfilled` | Order Service | Notification Service | `order_id, user_id, total_amount` |
+| `refund.requested` | Order Service | Payment Service | `order_id` |
+| `payment.refunded` | Payment Service | — (audit) | `order_id, payment_id, amount` |
 
 ### 📘 Concept — Saga orchestration
 
@@ -426,7 +444,11 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Shoppers may `GET /products/{id}` (not the full list) | Checkout needs price/availability; reservation details stay admin-only | ✅ Decided |
 | Gateway checks the token is valid; the owning service checks the role | Bad tokens are rejected at the edge without a wasted hop, while role rules live in one place, next to the data they protect | ✅ Decided |
 | Gateway routes by the first path segment (`/api/v1/orders/...` → Order Service) | A static table is easy to read and test; no service discovery is needed at this scale | ✅ Decided |
-| Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |
+| Fulfilment = Inventory commits the reservation, then the order is `fulfilled` | Until stock is committed, a stray release could hand paid-for units back to the shelf; committing first makes "fulfilled" mean the units are permanently allocated | ✅ Decided |
+| A charge that succeeds after cancellation is refunded, not resurrected | The stock may already be resold; reversing the money is the only compensation that is always safe | ✅ Decided |
+| The reconciler never cancels a `paid` order | Money has moved; the safe recovery is to retry the stalled step, not to undo the payment | ✅ Decided |
+| Status changes lock the order row | Event handlers and the reconciler run concurrently; without the lock the last writer wins and the saga can end in a contradictory state | ✅ Decided |
+| Mocked payment gateway interface shape | `charge(amount) -> bool`, `refund(amount)` | ✅ Decided |
 
 ## 14. Risks
 

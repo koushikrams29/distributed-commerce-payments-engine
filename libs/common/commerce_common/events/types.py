@@ -11,3 +11,8 @@ class EventType:
     PAYMENT_SUCCEEDED = "payment.succeeded"
     PAYMENT_FAILED = "payment.failed"
     ORDER_CANCELLED = "order.cancelled"
+    ORDER_PAID = "order.paid"
+    INVENTORY_COMMITTED = "inventory.committed"
+    ORDER_FULFILLED = "order.fulfilled"
+    REFUND_REQUESTED = "refund.requested"
+    PAYMENT_REFUNDED = "payment.refunded"

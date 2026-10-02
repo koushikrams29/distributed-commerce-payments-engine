@@ -44,6 +44,7 @@ class FakeInventoryClient:
         self.reserve_ok = reserve_ok
         self.reserve_calls: list[uuid.UUID] = []
         self.release_calls: list[uuid.UUID] = []
+        self.commit_calls: list[uuid.UUID] = []
 
     def get_product(self, product_id: uuid.UUID, *, access_token: str) -> ProductInfo:
         return ProductInfo(
@@ -64,6 +65,9 @@ class FakeInventoryClient:
 
     def release(self, *, order_id: uuid.UUID, access_token: str) -> None:
         self.release_calls.append(order_id)
+
+    def commit(self, *, order_id: uuid.UUID, access_token: str) -> None:
+        self.commit_calls.append(order_id)
 
 
 class FakePaymentClient:

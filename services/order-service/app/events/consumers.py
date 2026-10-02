@@ -22,6 +22,7 @@ def start_order_event_consumers() -> None:
             EventType.INVENTORY_FAILED,
             EventType.PAYMENT_SUCCEEDED,
             EventType.PAYMENT_FAILED,
+            EventType.INVENTORY_COMMITTED,
         ],
         handler=_dispatch,
     )
@@ -40,6 +41,8 @@ def _dispatch(routing_key: str, payload: dict[str, Any]) -> None:
             service.on_payment_succeeded(order_id)
         elif routing_key == EventType.PAYMENT_FAILED:
             service.on_payment_failed(order_id)
+        elif routing_key == EventType.INVENTORY_COMMITTED:
+            service.on_inventory_committed(order_id)
         else:
             logger.warning("ignored unknown inbound event: %s", routing_key)
     finally:

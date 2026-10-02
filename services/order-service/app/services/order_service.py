@@ -75,9 +75,22 @@ class OrderService:
         self.db.refresh(order)
         return order, True
 
+    # Every event handler locks the order row first, so two handlers (or a
+    # handler and the reconciler) can never both act on the same old status.
+
     def on_inventory_reserved(self, order_id: uuid.UUID) -> None:
-        order = self.repository.get_by_id(order_id)
-        if order is None or order.status != OrderStatus.PENDING.value:
+        order = self.repository.get_by_id_for_update(order_id)
+        if order is None:
+            return
+        if order.status == OrderStatus.CANCELLED.value:
+            # The reconciler gave up on this order before Inventory answered;
+            # hand the stock back or it stays held forever.
+            if settings.use_event_bus:
+                self._enqueue_order_cancelled(order)
+            self.db.commit()
+            return
+        if order.status != OrderStatus.PENDING.value:
+            self.db.rollback()
             return
 
         order.status = OrderStatus.RESERVED.value
@@ -86,30 +99,61 @@ class OrderService:
         self.db.commit()
 
     def on_inventory_failed(self, order_id: uuid.UUID) -> None:
-        order = self.repository.get_by_id(order_id)
+        order = self.repository.get_by_id_for_update(order_id)
         if order is None or order.status != OrderStatus.PENDING.value:
+            self.db.rollback()
             return
         order.status = OrderStatus.CANCELLED.value
         self.db.commit()
 
     def on_payment_succeeded(self, order_id: uuid.UUID) -> None:
-        order = self.repository.get_by_id(order_id)
-        if order is None or order.status != OrderStatus.RESERVED.value:
+        order = self.repository.get_by_id_for_update(order_id)
+        if order is None:
             return
+        if order.status == OrderStatus.CANCELLED.value:
+            # The charge landed after the order was cancelled (and its stock
+            # released): the customer paid for nothing, so refund them.
+            if settings.use_event_bus:
+                self._enqueue_refund_requested(order)
+            self.db.commit()
+            return
+        if order.status != OrderStatus.RESERVED.value:
+            self.db.rollback()
+            return
+
         order.status = OrderStatus.PAID.value
+        if settings.use_event_bus:
+            self._enqueue_order_paid(order)
         self.db.commit()
 
     def on_payment_failed(self, order_id: uuid.UUID) -> None:
-        order = self.repository.get_by_id(order_id)
+        order = self.repository.get_by_id_for_update(order_id)
         if order is None or order.status != OrderStatus.RESERVED.value:
+            self.db.rollback()
             return
         order.status = OrderStatus.CANCELLED.value
         if settings.use_event_bus:
             self._enqueue_order_cancelled(order)
         self.db.commit()
 
+    def on_inventory_committed(self, order_id: uuid.UUID) -> None:
+        order = self.repository.get_by_id_for_update(order_id)
+        if order is None or order.status != OrderStatus.PAID.value:
+            self.db.rollback()
+            return
+        order.status = OrderStatus.FULFILLED.value
+        if settings.use_event_bus:
+            self._enqueue_order_fulfilled(order)
+        self.db.commit()
+
     def reconcile_stuck_orders(self) -> int:
-        """Cancel orders stuck in pending/reserved past configured timeouts (FR-5)."""
+        """Drive orders stuck mid-saga towards a terminal status (FR-5).
+
+        `pending` and `reserved` orders past their timeout are cancelled.
+        `paid` orders are never cancelled — the money has been taken — so
+        the stalled `order.paid` step is re-sent instead. Returns the number
+        of orders acted on.
+        """
         now = datetime.now(UTC)
         pending_before = now - timedelta(
             minutes=settings.reconcile_pending_after_minutes
@@ -117,13 +161,18 @@ class OrderService:
         reserved_before = now - timedelta(
             minutes=settings.reconcile_reserved_after_minutes
         )
-        cancelled = 0
+        paid_before = now - timedelta(minutes=settings.reconcile_paid_after_minutes)
+        acted_on = 0
 
         for order in self.repository.list_stuck_orders(
             status=OrderStatus.PENDING.value, created_before=pending_before
         ):
             order.status = OrderStatus.CANCELLED.value
-            cancelled += 1
+            if settings.use_event_bus:
+                # Inventory may still reserve for this order; releasing is a
+                # no-op if it never did.
+                self._enqueue_order_cancelled(order)
+            acted_on += 1
 
         for order in self.repository.list_stuck_orders(
             status=OrderStatus.RESERVED.value, created_before=reserved_before
@@ -131,11 +180,19 @@ class OrderService:
             order.status = OrderStatus.CANCELLED.value
             if settings.use_event_bus:
                 self._enqueue_order_cancelled(order)
-            cancelled += 1
+            acted_on += 1
 
-        if cancelled:
-            self.db.commit()
-        return cancelled
+        if settings.use_event_bus:
+            for order in self.repository.list_stuck_orders(
+                status=OrderStatus.PAID.value, updated_before=paid_before
+            ):
+                self._enqueue_order_paid(order)
+                # Restart the clock so the next retry waits a full interval.
+                order.updated_at = now
+                acted_on += 1
+
+        self.db.commit()
+        return acted_on
 
     def reserve_inventory(self, order_id: uuid.UUID, *, access_token: str) -> None:
         """HTTP fallback when USE_EVENT_BUS=false (tests / local without RabbitMQ)."""
@@ -188,6 +245,12 @@ class OrderService:
 
             if result.status == "succeeded":
                 order.status = OrderStatus.PAID.value
+                db.commit()
+                try:
+                    self.inventory.commit(order_id=order.id, access_token=access_token)
+                except InventoryUnavailableError:
+                    return
+                order.status = OrderStatus.FULFILLED.value
                 db.commit()
                 return
 
@@ -265,11 +328,28 @@ class OrderService:
         )
 
     def _enqueue_order_cancelled(self, order: Order) -> None:
+        self._enqueue(order, EventType.ORDER_CANCELLED)
+
+    def _enqueue_order_paid(self, order: Order) -> None:
+        self._enqueue(order, EventType.ORDER_PAID)
+
+    def _enqueue_refund_requested(self, order: Order) -> None:
+        self._enqueue(order, EventType.REFUND_REQUESTED)
+
+    def _enqueue_order_fulfilled(self, order: Order) -> None:
+        self._enqueue(
+            order,
+            EventType.ORDER_FULFILLED,
+            user_id=str(order.user_id),
+            total_amount=str(order.total_amount),
+        )
+
+    def _enqueue(self, order: Order, event_type: str, **extra: str) -> None:
         self.outbox.add(
             OutboxEvent(
                 aggregate_id=order.id,
-                event_type=EventType.ORDER_CANCELLED,
-                payload_json={"order_id": str(order.id)},
+                event_type=event_type,
+                payload_json={"order_id": str(order.id), **extra},
             )
         )
 

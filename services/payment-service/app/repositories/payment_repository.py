@@ -39,6 +39,15 @@ class PaymentRepository:
         )
         return self.db.execute(stmt).scalar_one_or_none()
 
+    def list_for_order_for_update(self, order_id: uuid.UUID) -> list[Payment]:
+        stmt = (
+            select(Payment)
+            .where(Payment.order_id == order_id)
+            .with_for_update()
+            .options(selectinload(Payment.ledger_entries))
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
     def get_by_order_id(self, order_id: uuid.UUID) -> Payment | None:
         stmt = (
             select(Payment)

@@ -20,10 +20,9 @@ class NotificationService:
         self,
         *,
         order_id: uuid.UUID,
-        payment_id: uuid.UUID | None = None,
         channel: str | None = None,
     ) -> tuple[Notification, bool]:
-        """Record a fake confirmation notification (FR-8).
+        """Record a fake confirmation once the order is fulfilled (FR-8).
 
         Idempotent per (order_id, channel) — replays return the existing row.
         """
@@ -54,10 +53,9 @@ class NotificationService:
 
         self.db.refresh(notification)
         logger.info(
-            "fake %s confirmation sent for order=%s payment=%s notification=%s",
+            "fake %s confirmation sent for order=%s notification=%s",
             channel,
             order_id,
-            payment_id,
             notification.id,
         )
         return notification, True

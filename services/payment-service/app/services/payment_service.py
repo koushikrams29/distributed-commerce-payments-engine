@@ -68,5 +68,28 @@ class PaymentService:
         self.db.refresh(payment)
         return payment, True
 
+    def refund_for_order(self, order_id: uuid.UUID) -> list[Payment]:
+        """Refund every successful charge for an order; returns the ones refunded now.
+
+        Rows are locked so two deliveries of the same refund request cannot
+        both see `succeeded` and credit the customer twice.
+        """
+        refunded: list[Payment] = []
+        for payment in self.repository.list_for_order_for_update(order_id):
+            if payment.status != PaymentStatus.SUCCEEDED.value:
+                continue
+            self.gateway.refund(payment.amount)
+            payment.status = PaymentStatus.REFUNDED.value
+            self.repository.add_ledger_entry(
+                LedgerEntry(
+                    payment_id=payment.id,
+                    direction=LedgerDirection.CREDIT.value,
+                    amount=payment.amount,
+                )
+            )
+            refunded.append(payment)
+        self.db.commit()
+        return refunded
+
     def get_payment_for_order(self, order_id: uuid.UUID) -> Payment | None:
         return self.repository.get_by_order_id(order_id)

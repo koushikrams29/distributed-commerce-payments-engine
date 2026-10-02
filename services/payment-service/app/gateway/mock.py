@@ -12,3 +12,6 @@ class MockPaymentGateway:
     def charge(self, amount: Decimal) -> bool:
         del amount
         return self.outcome == "success"
+
+    def refund(self, amount: Decimal) -> None:
+        del amount
