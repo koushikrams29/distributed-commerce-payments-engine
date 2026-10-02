@@ -1,12 +1,13 @@
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from commerce_common.auth import Role
 
-from app.api.routers import auth
+from app.api.routers import auth, proxy
 from app.core.config import settings
 from app.core.db import SessionLocal, get_db
 from app.services.auth_service import AuthService
@@ -33,13 +34,19 @@ def _seed_dev_users() -> None:
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(app: FastAPI):
     _seed_dev_users()
-    yield
+    async with httpx.AsyncClient(timeout=settings.proxy_timeout_seconds) as client:
+        app.state.http_client = client
+        yield
 
 
 app = FastAPI(title="Gateway Service", version="0.1.0", lifespan=lifespan)
-app.include_router(auth.router)
+# Unversioned /auth kept so existing clients and scripts keep working.
+app.include_router(auth.router, include_in_schema=False)
+app.include_router(auth.router, prefix="/api/v1")
+# Must come after the /api/v1 auth routes: its catch-all path would shadow them.
+app.include_router(proxy.router)
 
 
 @app.get("/health")

@@ -137,12 +137,14 @@ Status columns are stored as `VARCHAR` with the allowed values enforced in appli
 
 All routes below are served through the Gateway (`/api/v1/...`), which proxies to the owning service after auth + rate-limit checks. Exact request/response field names may be refined once implemented — this is the contract we build against, not a guarantee it never changes.
 
+The Gateway (port 8001) maps the first path segment to a service: `orders` → Order (8000); `products`, `reservations` → Inventory (8002); `charges`, `payments` → Payment (8003); `recommendations` → Recommendation (8005). For example, `GET /api/v1/orders/123` is forwarded as `GET /orders/123`. The Gateway rejects missing or invalid tokens with `401` before forwarding; role checks happen in the owning service. If the downstream service is unreachable the Gateway returns `502`, and `504` if it times out (`PROXY_TIMEOUT_SECONDS`). Rate limiting is not implemented yet.
+
 ### Auth (Gateway)
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
-| POST | `/auth/login` | none | `{email, password}` | `{access_token, refresh_token}` |
-| POST | `/auth/refresh` | refresh token | `{refresh_token}` | `{access_token}` |
+| POST | `/api/v1/auth/login` | none | `{email, password}` | `{access_token, refresh_token}` |
+| POST | `/api/v1/auth/refresh` | refresh token | `{refresh_token}` | `{access_token}` |
 | WS | `/ws/dashboard` | admin JWT | — | stream of order/inventory/payment events |
 
 ### Orders (Order Service)
@@ -422,6 +424,8 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Reserve/release via HTTP or RabbitMQ (`USE_EVENT_BUS`) | HTTP path keeps CI simple; event path uses outbox + consumers for the saga | ✅ Decided |
 | Order create returns `pending` then reserves via BackgroundTasks | Satisfies FR-1 (synchronous order id) without waiting on Inventory locks; failure cancels the order | ✅ Decided |
 | Shoppers may `GET /products/{id}` (not the full list) | Checkout needs price/availability; reservation details stay admin-only | ✅ Decided |
+| Gateway checks the token is valid; the owning service checks the role | Bad tokens are rejected at the edge without a wasted hop, while role rules live in one place, next to the data they protect | ✅ Decided |
+| Gateway routes by the first path segment (`/api/v1/orders/...` → Order Service) | A static table is easy to read and test; no service discovery is needed at this scale | ✅ Decided |
 | Mocked payment gateway interface shape | — | ⏳ Open — see PRD §12 |
 
 ## 14. Risks
