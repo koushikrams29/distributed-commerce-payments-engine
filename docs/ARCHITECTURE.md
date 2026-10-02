@@ -175,6 +175,8 @@ Until RabbitMQ lands, Order Service (and tests) call reserve/release over HTTP. 
 
 With `USE_EVENT_BUS=true`, Order Service writes `order.created` and `charge.requested` to the outbox (same DB transaction), a relay publishes to RabbitMQ, and Inventory/Payment consumers handle reserve/charge. Set `USE_EVENT_BUS=false` to fall back to HTTP `BackgroundTasks` (used in CI).
 
+A background **reconciler** (FR-5) polls for orders stuck in `pending` or `reserved` longer than `RECONCILE_*_AFTER_MINUTES` and cancels them; reserved orders also get an `order.cancelled` outbox row so Inventory releases stock.
+
 ### Notifications (Notification Service)
 
 Consumer-only — no public write API. Listens for `payment.succeeded` on RabbitMQ, records a fake email confirmation in `notifications` (FR-8). Exposes `/health` only.

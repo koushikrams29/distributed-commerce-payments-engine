@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy.exc import IntegrityError
@@ -106,6 +107,35 @@ class OrderService:
         if settings.use_event_bus:
             self._enqueue_order_cancelled(order)
         self.db.commit()
+
+    def reconcile_stuck_orders(self) -> int:
+        """Cancel orders stuck in pending/reserved past configured timeouts (FR-5)."""
+        now = datetime.now(UTC)
+        pending_before = now - timedelta(
+            minutes=settings.reconcile_pending_after_minutes
+        )
+        reserved_before = now - timedelta(
+            minutes=settings.reconcile_reserved_after_minutes
+        )
+        cancelled = 0
+
+        for order in self.repository.list_stuck_orders(
+            status=OrderStatus.PENDING.value, created_before=pending_before
+        ):
+            order.status = OrderStatus.CANCELLED.value
+            cancelled += 1
+
+        for order in self.repository.list_stuck_orders(
+            status=OrderStatus.RESERVED.value, created_before=reserved_before
+        ):
+            order.status = OrderStatus.CANCELLED.value
+            if settings.use_event_bus:
+                self._enqueue_order_cancelled(order)
+            cancelled += 1
+
+        if cancelled:
+            self.db.commit()
+        return cancelled
 
     def reserve_inventory(self, order_id: uuid.UUID, *, access_token: str) -> None:
         """HTTP fallback when USE_EVENT_BUS=false (tests / local without RabbitMQ)."""

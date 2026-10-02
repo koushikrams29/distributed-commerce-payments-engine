@@ -55,3 +55,13 @@ class OrderRepository:
                 tuple_(Order.created_at, Order.id) < tuple_(created_at, order_id)
             )
         return list(self.db.execute(stmt).scalars().all())
+
+    def list_stuck_orders(
+        self, *, status: str, created_before: datetime
+    ) -> list[Order]:
+        stmt = (
+            select(Order)
+            .where(Order.status == status, Order.created_at < created_before)
+            .options(selectinload(Order.items))
+        )
+        return list(self.db.execute(stmt).scalars().all())
