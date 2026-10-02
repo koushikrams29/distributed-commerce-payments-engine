@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     payment_service_url: str = "http://127.0.0.1:8003"
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
     use_event_bus: bool = True
+    reconcile_enabled: bool = True
+    reconcile_pending_after_minutes: int = 30
+    reconcile_reserved_after_minutes: int = 30
+    reconcile_poll_interval_seconds: float = 60.0
 
 
 settings = Settings()
