@@ -2,11 +2,16 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
+from app.api.rate_limit import limit_auth_attempts
 from app.core.db import get_db
 from app.schemas.auth import RefreshRequest, TokenPair
 from app.services.auth_service import AuthError, AuthService
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+# Login is the brute-force target: limited per client IP before any password
+# hashing work is done.
+router = APIRouter(
+    prefix="/auth", tags=["auth"], dependencies=[Depends(limit_auth_attempts)]
+)
 
 
 @router.post("/login", response_model=TokenPair)
