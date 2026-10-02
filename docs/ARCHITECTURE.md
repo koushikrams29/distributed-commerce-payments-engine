@@ -137,7 +137,16 @@ Status columns are stored as `VARCHAR` with the allowed values enforced in appli
 
 All routes below are served through the Gateway (`/api/v1/...`), which proxies to the owning service after auth + rate-limit checks. Exact request/response field names may be refined once implemented — this is the contract we build against, not a guarantee it never changes.
 
-The Gateway (port 8001) maps the first path segment to a service: `orders` → Order (8000); `products`, `reservations` → Inventory (8002); `charges`, `payments` → Payment (8003); `recommendations` → Recommendation (8005). For example, `GET /api/v1/orders/123` is forwarded as `GET /orders/123`. The Gateway rejects missing or invalid tokens with `401` before forwarding; role checks happen in the owning service. If the downstream service is unreachable the Gateway returns `502`, and `504` if it times out (`PROXY_TIMEOUT_SECONDS`). Rate limiting is not implemented yet.
+The Gateway (port 8001) maps the first path segment to a service: `orders` → Order (8000); `products`, `reservations` → Inventory (8002); `charges`, `payments` → Payment (8003); `recommendations` → Recommendation (8005). For example, `GET /api/v1/orders/123` is forwarded as `GET /orders/123`. The Gateway rejects missing or invalid tokens with `401` before forwarding; role checks happen in the owning service. If the downstream service is unreachable the Gateway returns `502`, and `504` if it times out (`PROXY_TIMEOUT_SECONDS`).
+
+**Rate limiting (FR-7).** Token buckets in Redis, checked after the token is validated and before anything is forwarded:
+
+| Bucket | Keyed by | Default | Applies to |
+|---|---|---|---|
+| `api` | user ID (JWT `sub`) | burst 20, refill 5/s | every `/api/v1/...` proxied request |
+| `auth` | client IP | burst 5, refill 1 per 12 s | `/auth/login`, `/auth/refresh` (both prefixes) |
+
+Responses carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`; a rejected request gets `429` with `Retry-After` (seconds) and never reaches the downstream service. The check-and-spend is one Lua script, so it is atomic across concurrent requests and multiple Gateway instances, and it uses the Redis server clock so instances agree on time. If Redis is unreachable the Gateway allows the request and logs a warning (fail open). Behind a load balancer, run uvicorn with `--proxy-headers` so the `auth` bucket sees the real client IP. Settings: `REDIS_URL`, `RATE_LIMIT_ENABLED`, `RATE_LIMIT_{API,AUTH}_{CAPACITY,REFILL_PER_SECOND}`.
 
 ### Auth (Gateway)
 
@@ -444,6 +453,9 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Shoppers may `GET /products/{id}` (not the full list) | Checkout needs price/availability; reservation details stay admin-only | ✅ Decided |
 | Gateway checks the token is valid; the owning service checks the role | Bad tokens are rejected at the edge without a wasted hop, while role rules live in one place, next to the data they protect | ✅ Decided |
 | Gateway routes by the first path segment (`/api/v1/orders/...` → Order Service) | A static table is easy to read and test; no service discovery is needed at this scale | ✅ Decided |
+| Rate limit API traffic per user, login per IP | Per-user buckets don't punish users sharing a NAT and can't be dodged by switching networks; login has no verified user yet, so IP is the only key | ✅ Decided |
+| Token bucket as a Redis Lua script | One atomic round trip; a read-then-write from Python would let concurrent requests overspend the bucket | ✅ Decided |
+| Rate limiter fails open when Redis is down | Briefly losing throttling is cheaper than taking checkout offline; auth is still enforced at the Gateway and in every service | ✅ Decided |
 | Fulfilment = Inventory commits the reservation, then the order is `fulfilled` | Until stock is committed, a stray release could hand paid-for units back to the shelf; committing first makes "fulfilled" mean the units are permanently allocated | ✅ Decided |
 | A charge that succeeds after cancellation is refunded, not resurrected | The stock may already be resold; reversing the money is the only compensation that is always safe | ✅ Decided |
 | The reconciler never cancels a `paid` order | Money has moved; the safe recovery is to retry the stalled step, not to undo the payment | ✅ Decided |
