@@ -71,17 +71,23 @@ def _status(session_factory: sessionmaker[Session], order_id: uuid.UUID) -> str:
         db.close()
 
 
-def _outbox(engine: Engine, order_id: uuid.UUID) -> list[tuple[str, dict[str, Any]]]:
+def _outbox(
+    engine: Engine, order_id: uuid.UUID, *, include_status_changes: bool = False
+) -> list[tuple[str, dict[str, Any]]]:
+    """Saga events for the order; dashboard status events are opt-in."""
     with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT event_type, payload_json FROM outbox "
+                "WHERE aggregate_id = :id ORDER BY created_at"
+            ),
+            {"id": order_id},
+        )
         return [
             (row.event_type, row.payload_json)
-            for row in connection.execute(
-                text(
-                    "SELECT event_type, payload_json FROM outbox "
-                    "WHERE aggregate_id = :id ORDER BY created_at"
-                ),
-                {"id": order_id},
-            )
+            for row in rows
+            if include_status_changes
+            or row.event_type != EventType.ORDER_STATUS_CHANGED
         ]
 
 
@@ -109,6 +115,38 @@ def test_inventory_commit_fulfils_the_order(
     assert payload["order_id"] == str(order_id)
     assert payload["total_amount"] == "100.00"
     assert uuid.UUID(payload["user_id"])
+
+
+def test_every_transition_emits_a_status_change_for_the_dashboard(
+    session_factory: sessionmaker[Session], engine: Engine
+) -> None:
+    order_id = _create_order(session_factory, engine, status=OrderStatus.RESERVED)
+
+    _handle(session_factory, "on_payment_succeeded", order_id)
+    _handle(session_factory, "on_inventory_committed", order_id)
+
+    changes = [
+        payload
+        for event_type, payload in _outbox(engine, order_id, include_status_changes=True)
+        if event_type == EventType.ORDER_STATUS_CHANGED
+    ]
+    assert [(c["previous_status"], c["status"]) for c in changes] == [
+        ("reserved", "paid"),
+        ("paid", "fulfilled"),
+    ]
+    assert changes[0]["order_id"] == str(order_id)
+    assert changes[0]["total_amount"] == "100.00"
+    assert changes[0]["occurred_at"]
+
+
+def test_rejected_transition_emits_no_status_change(
+    session_factory: sessionmaker[Session], engine: Engine
+) -> None:
+    order_id = _create_order(session_factory, engine, status=OrderStatus.FULFILLED)
+
+    _handle(session_factory, "on_payment_failed", order_id)
+
+    assert _outbox(engine, order_id, include_status_changes=True) == []
 
 
 def test_redelivered_commit_does_not_fulfil_twice(

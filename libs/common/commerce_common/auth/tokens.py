@@ -18,6 +18,7 @@ class TokenError(Exception):
 class AccessTokenPayload:
     user_id: UUID
     role: Role
+    expires_at: datetime | None = None
 
 
 def create_access_token(
@@ -53,7 +54,8 @@ def decode_access_token(*, secret: str, token: str) -> AccessTokenPayload:
     try:
         user_id = UUID(payload["sub"])
         role = Role(payload["role"])
-    except (KeyError, ValueError) as exc:
+        expires_at = datetime.fromtimestamp(payload["exp"], UTC)
+    except (KeyError, ValueError, TypeError) as exc:
         raise TokenError("malformed token claims") from exc
 
-    return AccessTokenPayload(user_id=user_id, role=role)
+    return AccessTokenPayload(user_id=user_id, role=role, expires_at=expires_at)

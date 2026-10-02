@@ -25,5 +25,11 @@ class Settings(BaseSettings):
     rate_limit_auth_capacity: int = 5
     rate_limit_auth_refill_per_second: float = 1 / 12
 
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    dashboard_events_enabled: bool = True
+    dashboard_auth_timeout_seconds: float = 5.0
+    # JSON list, e.g. ["https://dashboard.example.com"]. Empty = same-origin only.
+    cors_allowed_origins: list[str] = []
+
 
 settings = Settings()

@@ -40,10 +40,12 @@ def test_create_order_writes_outbox_row_in_same_transaction(
         assert order.status == OrderStatus.PENDING.value
 
         with engine.connect() as connection:
-            outbox_count = connection.execute(
-                text("SELECT COUNT(*) FROM outbox WHERE aggregate_id = :id"),
-                {"id": order.id},
-            ).scalar_one()
-            assert outbox_count == 1
+            event_types = set(
+                connection.execute(
+                    text("SELECT event_type FROM outbox WHERE aggregate_id = :id"),
+                    {"id": order.id},
+                ).scalars()
+            )
+            assert event_types == {"order.created", "order.status_changed"}
     finally:
         db.close()

@@ -19,6 +19,7 @@ os.environ["REFRESH_TOKEN_EXPIRE_DAYS"] = "7"
 # Limiter behaviour is tested explicitly with a fake or a real Redis container;
 # everywhere else it would only make tests depend on a Redis being reachable.
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+os.environ["DASHBOARD_EVENTS_ENABLED"] = "false"
 
 import pytest
 from alembic import command

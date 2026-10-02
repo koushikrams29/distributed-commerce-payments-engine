@@ -103,13 +103,16 @@ def test_reconciler_cancels_stuck_reserved_and_enqueues_release(
         db.close()
 
     with engine.connect() as connection:
-        event_type = connection.execute(
-            text(
-                "SELECT event_type FROM outbox WHERE aggregate_id = :id"
-            ),
-            {"id": order_id},
-        ).scalar_one()
-        assert event_type == EventType.ORDER_CANCELLED
+        event_types = set(
+            connection.execute(
+                text("SELECT event_type FROM outbox WHERE aggregate_id = :id"),
+                {"id": order_id},
+            ).scalars()
+        )
+        assert event_types == {
+            EventType.ORDER_CANCELLED,
+            EventType.ORDER_STATUS_CHANGED,
+        }
 
 
 def test_reconciler_ignores_recent_orders(
