@@ -43,6 +43,20 @@ def test_login_returns_token_pair(
     assert body["refresh_token"]
 
 
+def test_login_is_served_under_versioned_prefix(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    _create_user(session_factory, email="shopper@example.com", password="secret-pass")
+
+    response = client.post(
+        "/api/v1/auth/login",
+        data={"username": "shopper@example.com", "password": "secret-pass"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["access_token"]
+
+
 def test_login_rejects_bad_password(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:
