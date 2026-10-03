@@ -12,7 +12,9 @@ services:
       # Only executed the first time the volume is created.
       - ./postgres/init-databases.sql:/docker-entrypoint-initdb.d/01-init-databases.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      # Over TCP: while a new volume is initialised, a temporary server accepts
+      # only socket connections, and a socket check would report it ready.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER}"]
       interval: 5s
       timeout: 5s
       retries: 5
