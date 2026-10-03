@@ -1,3 +1,8 @@
-from commerce_common.messaging.rabbitmq import publish_event, run_consumer
+from commerce_common.messaging.rabbitmq import (
+    Consumer,
+    NonRetryableError,
+    publish_event,
+    run_consumer,
+)
 
-__all__ = ["publish_event", "run_consumer"]
+__all__ = ["Consumer", "NonRetryableError", "publish_event", "run_consumer"]

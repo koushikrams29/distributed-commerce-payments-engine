@@ -263,6 +263,34 @@ The Gateway's dashboard relay consumes every event above (`#`), not just `order.
 
 HTTP is request → response: the server can only speak when asked. A **WebSocket** upgrades one HTTP connection into a long-lived two-way channel, so the server can push an event the moment it happens instead of the browser polling every few seconds. **Fan-out** means one incoming event is copied to many receivers — here, RabbitMQ fans out to every Gateway instance (one private queue each), and each Gateway fans out to every admin socket it holds. **Backpressure** is what happens when a receiver is slower than the sender: something has to give. Buffering forever eventually exhausts memory, and blocking would let one slow laptop stall every other admin, so each socket gets a bounded queue and a client that falls too far behind is disconnected (`1013`) and told to resync.
 
+### Failure handling: retries and dead letters
+
+Every service consumes from its own durable work queue (`order.events`, `inventory.events`, `payment.events`, `notification.events`, `recommendation.events`). When a handler raises, the message is not put back at the front of the queue — that would retry it in a tight loop and block every message behind it. Instead it is parked on a delay queue and comes back later:
+
+| Attempt | On failure the message goes to | Comes back after |
+|---|---|---|
+| 1 | `<queue>.retry.2s` | 2 s |
+| 2 | `<queue>.retry.10s` | 10 s |
+| 3 | `<queue>.retry.30s` | 30 s |
+| 4 | `<queue>.dlq` | never — waits for an operator |
+
+Nothing consumes a retry queue: each has a fixed message TTL and dead-letters expired messages back to the work queue through the default exchange. The event type travels in the `x-original-routing-key` header, so handlers still dispatch correctly; `x-retry-count` and `x-last-error` record the history. A body that is not a JSON object, or a handler that raises `NonRetryableError`, goes straight to the dead-letter queue — retrying cannot fix it. The copy is published with publisher confirms before the original is acknowledged, so a crash in between can duplicate a message but never lose one (handlers are idempotent).
+
+The dashboard relay's private queue is the exception: failures there are logged and dropped, because the queue disappears with the process and the live view resynchronises from REST anyway.
+
+Once the cause is fixed, move parked messages back (they get a full set of retries again):
+
+```bash
+python -m commerce_common.messaging.replay payment.events --dry-run   # how many are waiting
+python -m commerce_common.messaging.replay payment.events --limit 10  # replay up to 10
+```
+
+Replay publishes straight to the named work queue, not the topic exchange, so other services do not receive the event a second time.
+
+### 📘 Concept — Dead-letter queues and poison messages
+
+A **poison message** is one that fails every time it is processed — a payload a handler cannot parse, or a bug triggered by one specific order. With plain "nack and requeue" it returns to the queue immediately, fails again, and loops forever: it burns CPU, floods the logs, and (with one message processed at a time) blocks every healthy message behind it. **Bounded retries with backoff** separate the two kinds of failure: a transient one (database restarting, a network blip) usually succeeds after a short wait, so retry a few times with growing delays. Anything still failing after that is almost certainly permanent, so move it aside to a **dead-letter queue** — the queue keeps flowing, nothing is lost, and an engineer can inspect the message, fix the cause, and replay it.
+
 ### 📘 Concept — Saga orchestration
 
 No shared transaction spans all 5 services, so a multi-step operation needs an explicit way to undo earlier steps when a later one fails — that's a **saga**. We use **orchestration** (Order Service explicitly drives the sequence and reacts to each event) rather than **choreography** (services independently reacting with no central coordinator), because orchestration is far easier to reason about and debug the first time you build one.
@@ -492,6 +520,10 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Slow dashboard clients are disconnected, not buffered | A bounded queue per socket caps Gateway memory and stops one slow client from delaying the rest; the client reloads the snapshot on reconnect | ✅ Decided |
 | Dashboard merges by lifecycle position, not timestamp | Statuses only move forward, so "further along wins" is correct in any arrival order and avoids comparing clocks from different services | ✅ Decided |
 | Explicit `order.status_changed` event | Lets read-side consumers follow order status without knowing which saga events cause which transitions | ✅ Decided |
+| Bounded retries (2 s / 10 s / 30 s) then a dead-letter queue, not infinite requeue | Requeue-forever lets one poison message block a queue and hide real outages in log noise; three spaced retries absorb transient failures | ✅ Decided |
+| Retry delays via one TTL queue per delay, not per-message expiry | RabbitMQ only expires the message at the head of a queue, so mixed per-message delays block each other; one TTL per queue keeps every delay exact | ✅ Decided |
+| Retry state in message headers, moved by the consumer, not `x-dead-letter-exchange` on the work queue | Existing queues keep their arguments (RabbitMQ rejects redeclaring with new ones), and the consumer can record the error and attempt count on the message | ✅ Decided |
+| Retry/dead-letter copy confirmed by the broker before the original is acked | The worst case becomes a duplicate (handled by idempotent handlers) rather than a lost event | ✅ Decided |
 | Mocked payment gateway interface shape | `charge(amount) -> bool`, `refund(amount)` | ✅ Decided |
 
 ## 14. Risks
