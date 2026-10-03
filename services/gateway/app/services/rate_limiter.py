@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from app.core.metrics import RATE_LIMIT_DECISIONS
+
 logger = logging.getLogger(__name__)
 
 # Runs atomically inside Redis: concurrent requests (even from several gateway
@@ -105,11 +107,13 @@ class TokenBucketLimiter:
                 "rate limiter %s unavailable; allowing request", self.name,
                 exc_info=True,
             )
+            RATE_LIMIT_DECISIONS.labels(self.name, "fail_open").inc()
             return RateLimitResult(
                 allowed=True, limit=self.capacity, remaining=None,
                 retry_after_seconds=0,
             )
 
+        RATE_LIMIT_DECISIONS.labels(self.name, "allowed" if allowed else "limited").inc()
         return RateLimitResult(
             allowed=bool(allowed),
             limit=self.capacity,

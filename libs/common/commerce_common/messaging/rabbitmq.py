@@ -25,11 +25,22 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pika
+from opentelemetry import propagate, trace
+from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 from pika.adapters.blocking_connection import BlockingChannel
 
 from commerce_common.events.types import EVENT_EXCHANGE
+from commerce_common.messaging.metrics import (
+    MESSAGE_HANDLER_DURATION,
+    MESSAGES_CONSUMED,
+    MESSAGES_PUBLISHED,
+)
+from commerce_common.observability.tracing import extract_context
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
+
+FANOUT_QUEUE_LABEL = "fanout"
 
 EventHandler = Callable[[str, dict[str, Any]], None]
 
@@ -99,21 +110,56 @@ def declare_work_queue(
     channel.queue_declare(queue=dead_letter_queue_name(queue_name), durable=True)
 
 
-def publish_event(url: str, routing_key: str, payload: dict[str, Any]) -> None:
-    connection = pika.BlockingConnection(pika.URLParameters(url))
-    try:
-        channel = connection.channel()
-        declare_exchange(channel)
-        channel.basic_publish(
-            exchange=EVENT_EXCHANGE,
-            routing_key=routing_key,
-            body=json.dumps(payload),
-            properties=pika.BasicProperties(
-                delivery_mode=2, content_type="application/json"
-            ),
-        )
-    finally:
-        connection.close()
+def publish_event(
+    url: str,
+    routing_key: str,
+    payload: dict[str, Any],
+    *,
+    trace_context: dict[str, str] | None = None,
+) -> None:
+    """Publish an event, carrying the trace context in the message headers.
+
+    `trace_context` overrides the active trace — the outbox relay passes the
+    context saved with the row, so the event joins the request that wrote it
+    rather than the relay's polling loop.
+    """
+    parent = extract_context(trace_context) if trace_context else None
+    with tracer.start_as_current_span(
+        f"{routing_key} publish",
+        context=parent,
+        kind=SpanKind.PRODUCER,
+        attributes=_messaging_attributes(EVENT_EXCHANGE, routing_key),
+    ):
+        headers: dict[str, str] = {}
+        propagate.inject(headers)
+        connection = pika.BlockingConnection(pika.URLParameters(url))
+        try:
+            channel = connection.channel()
+            declare_exchange(channel)
+            channel.basic_publish(
+                exchange=EVENT_EXCHANGE,
+                routing_key=routing_key,
+                body=json.dumps(payload),
+                properties=pika.BasicProperties(
+                    delivery_mode=2, content_type="application/json", headers=headers
+                ),
+            )
+        finally:
+            connection.close()
+    MESSAGES_PUBLISHED.labels(routing_key).inc()
+
+
+def _messaging_attributes(destination: str, routing_key: str) -> dict[str, str]:
+    return {
+        "messaging.system": "rabbitmq",
+        "messaging.destination.name": destination,
+        "messaging.rabbitmq.destination.routing_key": routing_key,
+    }
+
+
+def _record_failure(span: Span, exc: BaseException) -> None:
+    span.record_exception(exc)
+    span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
 
 
 @dataclass
@@ -197,7 +243,7 @@ def run_consumer(
             stopping.wait(reconnect_delay_seconds)
 
     thread = threading.Thread(
-        target=_run_forever, name=f"rmq-{queue_name or 'fanout'}", daemon=True
+        target=_run_forever, name=f"rmq-{queue_name or FANOUT_QUEUE_LABEL}", daemon=True
     )
     thread.start()
     return Consumer(thread=thread, _stopping=stopping)
@@ -250,48 +296,100 @@ def _work_callback(
                 },
             )
 
-        try:
-            payload = _decode(body)
-        except NonRetryableError as exc:
-            dead_letter(_describe(exc))
-            channel.basic_ack(delivery_tag=method.delivery_tag)
-            return
-
-        try:
-            handler(routing_key, payload)
-        except NonRetryableError as exc:
-            dead_letter(_describe(exc))
-        except Exception as exc:
-            if retries < len(delays):
-                delay = delays[retries]
-                logger.warning(
-                    "handler for %s on %s failed (retry %d/%d in %gs)",
-                    routing_key, queue_name, retries + 1, len(delays), delay,
-                    exc_info=True,
-                )
-                forward(
-                    retry_queue_name(queue_name, delay),
-                    {RETRY_COUNT_HEADER: retries + 1, LAST_ERROR_HEADER: _describe(exc)},
-                )
-            else:
-                logger.exception("handler for %s on %s failed", routing_key, queue_name)
-                dead_letter(_describe(exc))
+        # Retries keep the original headers, so every attempt joins the trace
+        # of the request that published the event.
+        with tracer.start_as_current_span(
+            f"{routing_key} process",
+            context=extract_context(headers),
+            kind=SpanKind.CONSUMER,
+            attributes={
+                **_messaging_attributes(queue_name, routing_key),
+                "messaging.rabbitmq.retry_count": retries,
+            },
+        ) as span:
+            outcome = _handle_with_retries(
+                span, handler, routing_key, body, queue_name, retries, delays,
+                forward=forward, dead_letter=dead_letter,
+            )
+        MESSAGES_CONSUMED.labels(queue_name, routing_key, outcome).inc()
         channel.basic_ack(delivery_tag=method.delivery_tag)
 
     return callback
+
+
+def _handle_with_retries(
+    span: Span,
+    handler: EventHandler,
+    routing_key: str,
+    body: bytes,
+    queue_name: str,
+    retries: int,
+    delays: tuple[float, ...],
+    *,
+    forward: Callable[[str, dict[str, Any]], None],
+    dead_letter: Callable[[str], None],
+) -> str:
+    """Run the handler; on failure route the message onward. Returns the outcome label."""
+    try:
+        payload = _decode(body)
+    except NonRetryableError as exc:
+        _record_failure(span, exc)
+        dead_letter(_describe(exc))
+        return "dead_lettered"
+
+    started = time.perf_counter()
+    try:
+        handler(routing_key, payload)
+    except NonRetryableError as exc:
+        _record_failure(span, exc)
+        dead_letter(_describe(exc))
+        return "dead_lettered"
+    except Exception as exc:
+        _record_failure(span, exc)
+        if retries < len(delays):
+            delay = delays[retries]
+            logger.warning(
+                "handler for %s on %s failed (retry %d/%d in %gs)",
+                routing_key, queue_name, retries + 1, len(delays), delay,
+                exc_info=True,
+            )
+            forward(
+                retry_queue_name(queue_name, delay),
+                {RETRY_COUNT_HEADER: retries + 1, LAST_ERROR_HEADER: _describe(exc)},
+            )
+            return "retried"
+        logger.exception("handler for %s on %s failed", routing_key, queue_name)
+        dead_letter(_describe(exc))
+        return "dead_lettered"
+    finally:
+        MESSAGE_HANDLER_DURATION.labels(queue_name, routing_key).observe(
+            time.perf_counter() - started
+        )
+    return "success"
 
 
 def _fanout_callback(handler: EventHandler) -> Callable[..., None]:
     def callback(
         channel: BlockingChannel,
         method: pika.spec.Basic.Deliver,
-        _properties: pika.spec.BasicProperties,
+        properties: pika.spec.BasicProperties,
         body: bytes,
     ) -> None:
-        try:
-            handler(method.routing_key, _decode(body))
-        except Exception:
-            logger.exception("dropping %s after handler failure", method.routing_key)
+        routing_key = method.routing_key
+        outcome = "success"
+        with tracer.start_as_current_span(
+            f"{routing_key} process",
+            context=extract_context(properties.headers),
+            kind=SpanKind.CONSUMER,
+            attributes=_messaging_attributes(FANOUT_QUEUE_LABEL, routing_key),
+        ) as span:
+            try:
+                handler(routing_key, _decode(body))
+            except Exception as exc:
+                _record_failure(span, exc)
+                logger.exception("dropping %s after handler failure", routing_key)
+                outcome = "dropped"
+        MESSAGES_CONSUMED.labels(FANOUT_QUEUE_LABEL, routing_key, outcome).inc()
         channel.basic_ack(delivery_tag=method.delivery_tag)
 
     return callback

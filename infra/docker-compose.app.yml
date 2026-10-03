@@ -1,0 +1,189 @@
+# The whole application in containers, on top of the infrastructure in docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.app.yml up --build
+#
+# Then open http://localhost:8080. Only the dashboard is published: the API is
+# reached through it (/api, /ws), exactly as a browser in production would.
+# Needs JWT_SECRET in infra/.env (see .env.example).
+
+x-app-environment: &app-environment
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+  LOG_FORMAT: json
+  LOG_LEVEL: INFO
+
+x-jwt-secret: &jwt-secret ${JWT_SECRET:?Set JWT_SECRET in infra/.env (see infra/.env.example)}
+
+x-infrastructure: &infrastructure
+  postgres:
+    condition: service_healthy
+  rabbitmq:
+    condition: service_healthy
+  jaeger:
+    condition: service_started
+
+# Migrations run once per deploy in a one-off job, never inside the service:
+# with several replicas starting together, each would race to migrate.
+x-migration: &migration
+  command: ["alembic", "upgrade", "head"]
+  restart: "no"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  prometheus:
+    volumes:
+      - ./prometheus/targets/compose.yml:/etc/prometheus/targets/commerce.yml:ro
+
+  order-service:
+    build: &order-build
+      context: ..
+      dockerfile: services/order-service/Dockerfile
+    image: commerce/order-service:local
+    restart: unless-stopped
+    environment: &order-environment
+      <<: *app-environment
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/order_service
+      JWT_SECRET: *jwt-secret
+      INVENTORY_SERVICE_URL: http://inventory-service:8002
+      PAYMENT_SERVICE_URL: http://payment-service:8003
+    depends_on:
+      <<: *infrastructure
+      order-migrate:
+        condition: service_completed_successfully
+
+  order-migrate:
+    <<: *migration
+    build: *order-build
+    image: commerce/order-service:local
+    environment: *order-environment
+
+  gateway:
+    build: &gateway-build
+      context: ..
+      dockerfile: services/gateway/Dockerfile
+    image: commerce/gateway:local
+    restart: unless-stopped
+    environment: &gateway-environment
+      <<: *app-environment
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/gateway_service
+      JWT_SECRET: *jwt-secret
+      SEED_DEV_USERS: "true"
+      ORDER_SERVICE_URL: http://order-service:8000
+      INVENTORY_SERVICE_URL: http://inventory-service:8002
+      PAYMENT_SERVICE_URL: http://payment-service:8003
+      RECOMMENDATION_SERVICE_URL: http://recommendation-service:8005
+      REDIS_URL: redis://redis:6379/0
+      # Read the client IP from X-Forwarded-For (the rate limiter keys on it).
+      # Safe only because the gateway is not published: every request arrives
+      # through the dashboard's nginx, which overwrites that header.
+      FORWARDED_ALLOW_IPS: "*"
+    depends_on:
+      <<: *infrastructure
+      redis:
+        condition: service_healthy
+      gateway-migrate:
+        condition: service_completed_successfully
+
+  gateway-migrate:
+    <<: *migration
+    build: *gateway-build
+    image: commerce/gateway:local
+    environment: *gateway-environment
+
+  inventory-service:
+    build: &inventory-build
+      context: ..
+      dockerfile: services/inventory-service/Dockerfile
+    image: commerce/inventory-service:local
+    restart: unless-stopped
+    environment: &inventory-environment
+      <<: *app-environment
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/inventory_service
+      JWT_SECRET: *jwt-secret
+      SEED_DEV_PRODUCTS: "true"
+    depends_on:
+      <<: *infrastructure
+      inventory-migrate:
+        condition: service_completed_successfully
+
+  inventory-migrate:
+    <<: *migration
+    build: *inventory-build
+    image: commerce/inventory-service:local
+    environment: *inventory-environment
+
+  payment-service:
+    build: &payment-build
+      context: ..
+      dockerfile: services/payment-service/Dockerfile
+    image: commerce/payment-service:local
+    restart: unless-stopped
+    environment: &payment-environment
+      <<: *app-environment
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/payment_service
+      JWT_SECRET: *jwt-secret
+    depends_on:
+      <<: *infrastructure
+      payment-migrate:
+        condition: service_completed_successfully
+
+  payment-migrate:
+    <<: *migration
+    build: *payment-build
+    image: commerce/payment-service:local
+    environment: *payment-environment
+
+  notification-service:
+    build: &notification-build
+      context: ..
+      dockerfile: services/notification-service/Dockerfile
+    image: commerce/notification-service:local
+    restart: unless-stopped
+    environment: &notification-environment
+      <<: *app-environment
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/notification_service
+    depends_on:
+      <<: *infrastructure
+      notification-migrate:
+        condition: service_completed_successfully
+
+  notification-migrate:
+    <<: *migration
+    build: *notification-build
+    image: commerce/notification-service:local
+    environment: *notification-environment
+
+  recommendation-service:
+    build: &recommendation-build
+      context: ..
+      dockerfile: services/recommendation-service/Dockerfile
+    image: commerce/recommendation-service:local
+    restart: unless-stopped
+    environment: &recommendation-environment
+      <<: *app-environment
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/recommendation_service
+      JWT_SECRET: *jwt-secret
+    depends_on:
+      <<: *infrastructure
+      recommendation-migrate:
+        condition: service_completed_successfully
+
+  recommendation-migrate:
+    <<: *migration
+    build: *recommendation-build
+    image: commerce/recommendation-service:local
+    environment: *recommendation-environment
+
+  frontend:
+    build: ../frontend
+    image: commerce/frontend:local
+    restart: unless-stopped
+    environment:
+      GATEWAY_URL: http://gateway:8001
+    depends_on:
+      gateway:
+        condition: service_healthy
+    ports:
+      - "8080:8080"

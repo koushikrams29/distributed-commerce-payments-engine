@@ -72,10 +72,15 @@ Python, FastAPI, PostgreSQL, Redis, RabbitMQ/Kafka, React + TypeScript, Docker, 
 
 ## 7. Getting started
 
+Needs Docker. From the repository root:
+
 ```bash
-# Placeholder — filled in once the Docker Compose scaffold exists
-docker-compose up --build
+cp infra/.env.example infra/.env
+cd infra
+docker compose -f docker-compose.yml -f docker-compose.app.yml up --build
 ```
+
+Open http://localhost:8080 and sign in as `admin@example.com` / `admin-pass-123`. Traces are at http://localhost:16686 (Jaeger) and metrics at http://localhost:3000 (Grafana). Running services on the host for development is described in [ARCHITECTURE §8](./docs/ARCHITECTURE.md#8-local-dev-environment).
 
 ## 8. Test coverage / CI
 

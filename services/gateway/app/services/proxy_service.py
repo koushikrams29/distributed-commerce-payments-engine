@@ -1,7 +1,11 @@
+import time
+from typing import NamedTuple
+
 import httpx
 from fastapi import Request, Response
 
 from app.core.config import settings
+from app.core.metrics import UPSTREAM_DURATION, UPSTREAM_REQUESTS
 
 # Headers that describe a single network hop, not the request itself.
 # Forwarding them would confuse the next hop (wrong Host, stale Content-Length).
@@ -33,14 +37,21 @@ class UpstreamTimeoutError(Exception):
     """The downstream service did not answer in time."""
 
 
-def resolve_upstream(resource: str) -> str:
+class Upstream(NamedTuple):
+    service: str
+    base_url: str
+
+
+def resolve_upstream(resource: str) -> Upstream:
     routes = {
-        "orders": settings.order_service_url,
-        "products": settings.inventory_service_url,
-        "reservations": settings.inventory_service_url,
-        "charges": settings.payment_service_url,
-        "payments": settings.payment_service_url,
-        "recommendations": settings.recommendation_service_url,
+        "orders": Upstream("order-service", settings.order_service_url),
+        "products": Upstream("inventory-service", settings.inventory_service_url),
+        "reservations": Upstream("inventory-service", settings.inventory_service_url),
+        "charges": Upstream("payment-service", settings.payment_service_url),
+        "payments": Upstream("payment-service", settings.payment_service_url),
+        "recommendations": Upstream(
+            "recommendation-service", settings.recommendation_service_url
+        ),
     }
     try:
         return routes[resource]
@@ -54,26 +65,31 @@ async def forward(
     path: str,
 ) -> Response:
     resource = path.split("/", 1)[0]
-    base_url = resolve_upstream(resource)
+    upstream_service = resolve_upstream(resource)
 
     headers = {
         key: value
         for key, value in request.headers.items()
         if key.lower() not in HOP_BY_HOP_HEADERS
     }
+    body = await request.body()
 
+    started = time.perf_counter()
     try:
         upstream = await client.request(
             request.method,
-            f"{base_url.rstrip('/')}/{path}",
+            f"{upstream_service.base_url.rstrip('/')}/{path}",
             params=list(request.query_params.multi_items()),
             headers=headers,
-            content=await request.body(),
+            content=body,
         )
     except httpx.TimeoutException as exc:
+        _record_upstream(upstream_service.service, "timeout", started)
         raise UpstreamTimeoutError(resource) from exc
     except httpx.RequestError as exc:
+        _record_upstream(upstream_service.service, "unavailable", started)
         raise UpstreamUnavailableError(resource) from exc
+    _record_upstream(upstream_service.service, str(upstream.status_code), started)
 
     # httpx already decompressed the body, so the original encoding header would lie.
     excluded = HOP_BY_HOP_HEADERS | {"content-encoding"}
@@ -87,3 +103,8 @@ async def forward(
         status_code=upstream.status_code,
         headers=response_headers,
     )
+
+
+def _record_upstream(service: str, outcome: str, started: float) -> None:
+    UPSTREAM_REQUESTS.labels(service, outcome).inc()
+    UPSTREAM_DURATION.labels(service).observe(time.perf_counter() - started)

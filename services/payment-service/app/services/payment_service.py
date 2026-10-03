@@ -4,6 +4,12 @@ from decimal import Decimal
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.metrics import (
+    PAYMENT_ATTEMPTS,
+    PAYMENT_CAPTURED_AMOUNT,
+    PAYMENT_REFUNDS,
+    PAYMENT_REPLAYS,
+)
 from app.gateway.mock import MockPaymentGateway
 from app.models import LedgerDirection, LedgerEntry, Payment, PaymentStatus
 from app.repositories.payment_repository import PaymentRepository
@@ -33,6 +39,7 @@ class PaymentService:
         """
         existing = self.repository.get_by_idempotency_key(idempotency_key)
         if existing is not None:
+            PAYMENT_REPLAYS.inc()
             return existing, False
 
         payment = Payment(
@@ -50,6 +57,7 @@ class PaymentService:
             existing = self.repository.get_by_idempotency_key(idempotency_key)
             if existing is None:
                 raise
+            PAYMENT_REPLAYS.inc()
             return existing, False
 
         if self.gateway.charge(amount):
@@ -65,6 +73,9 @@ class PaymentService:
             payment.status = PaymentStatus.FAILED.value
 
         self.db.commit()
+        PAYMENT_ATTEMPTS.labels(payment.status).inc()
+        if payment.status == PaymentStatus.SUCCEEDED.value:
+            PAYMENT_CAPTURED_AMOUNT.inc(float(amount))
         self.db.refresh(payment)
         return payment, True
 
@@ -89,6 +100,7 @@ class PaymentService:
             )
             refunded.append(payment)
         self.db.commit()
+        PAYMENT_REFUNDS.inc(len(refunded))
         return refunded
 
     def get_payment_for_order(self, order_id: uuid.UUID) -> Payment | None:

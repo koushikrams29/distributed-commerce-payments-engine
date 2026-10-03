@@ -9,6 +9,8 @@ os.environ.setdefault(
     "postgresql+psycopg2://ci:ci@localhost:5432/ci_unused_placeholder",
 )
 os.environ.setdefault("USE_EVENT_BUS", "false")
+# Spans are still created (logs get trace IDs) but never exported from tests.
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
 
 import pytest
 from alembic import command

@@ -1,0 +1,9 @@
+# Test dependencies. The constraint keeps runtime packages at the versions in
+# requirements.txt, so tests run against exactly what the image ships.
+-r requirements.in
+-c requirements.txt
+
+pytest
+pytest-asyncio
+httpx
+testcontainers[postgres]>=4.15,<5

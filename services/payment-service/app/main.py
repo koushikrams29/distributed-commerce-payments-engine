@@ -4,9 +4,11 @@ from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from commerce_common.observability import setup_observability
+
 from app.api.routers import charges, payments
 from app.core.config import settings
-from app.core.db import get_db
+from app.core.db import engine, get_db
 from app.events.consumers import start_payment_event_consumers
 
 
@@ -18,6 +20,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Payment Service", version="0.1.0", lifespan=lifespan)
+setup_observability(app, service_name="payment-service", settings=settings, engine=engine)
 app.include_router(charges.router)
 app.include_router(payments.router)
 

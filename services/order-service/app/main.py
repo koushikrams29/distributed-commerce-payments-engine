@@ -4,9 +4,11 @@ from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from commerce_common.observability import setup_observability
+
 from app.api.routers import orders
 from app.core.config import settings
-from app.core.db import get_db
+from app.core.db import engine, get_db
 from app.events.consumers import start_order_event_consumers
 from app.events.outbox_relay import start_outbox_relay
 from app.events.reconciler import start_order_reconciler
@@ -23,6 +25,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Order Service", version="0.1.0", lifespan=lifespan)
+setup_observability(app, service_name="order-service", settings=settings, engine=engine)
 
 app.include_router(orders.router)
 

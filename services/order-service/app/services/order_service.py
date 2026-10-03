@@ -18,6 +18,7 @@ from app.clients.payment import PaymentClient, PaymentUnavailableError
 from app.core.config import settings
 from app.core.cursors import decode_cursor, encode_cursor
 from app.core.db import SessionLocal
+from app.core.metrics import RECONCILER_ACTIONS
 from app.models import Order, OrderItem, OrderStatus, OutboxEvent
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
@@ -193,6 +194,7 @@ class OrderService:
                 acted_on += 1
 
         self.db.commit()
+        RECONCILER_ACTIONS.inc(acted_on)
         return acted_on
 
     def reserve_inventory(self, order_id: uuid.UUID, *, access_token: str) -> None:

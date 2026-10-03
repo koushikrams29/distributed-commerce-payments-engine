@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+#   docker build -t commerce/frontend frontend
+
+FROM node:22-alpine AS build
+WORKDIR /src
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY . .
+RUN npm run build
+
+
+# Runs as a non-root user and listens on 8080.
+FROM nginxinc/nginx-unprivileged:1.30-alpine
+# The image's entrypoint renders templates with envsubst at start, so one image
+# works against any gateway address.
+COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY --from=build /src/dist /usr/share/nginx/html
+ENV GATEWAY_URL=http://gateway:8001 \
+    NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1
+EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -q --spider http://127.0.0.1:8080/ || exit 1

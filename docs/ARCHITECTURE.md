@@ -25,10 +25,13 @@ graph TD
     MQ -->|payment.succeeded| RecoSvc[Recommendation Service]
     InventorySvc -->|row-level lock| InvDB[(Inventory DB - Postgres)]
     Gateway -->|token bucket check| Redis
-    OrderSvc -. spans .-> OTel[OpenTelemetry Collector]
-    InventorySvc -. spans .-> OTel
-    PaymentSvc -. spans .-> OTel
-    OTel --> Prom[Prometheus] --> Grafana[Grafana]
+    OrderSvc -. OTLP spans .-> Jaeger[Jaeger]
+    InventorySvc -. OTLP spans .-> Jaeger
+    PaymentSvc -. OTLP spans .-> Jaeger
+    Prom[Prometheus] -. scrapes /metrics .-> OrderSvc
+    Prom -. scrapes /metrics .-> PaymentSvc
+    Grafana[Grafana] --> Prom
+    Grafana --> Jaeger
     Gateway <-->|WebSocket| Client
 ```
 
@@ -317,7 +320,7 @@ Each client has a bucket of N tokens refilling at a fixed rate; each request cos
 
 ### 📘 Concept — OpenTelemetry distributed tracing
 
-A trace ID generated at the Gateway propagates through every HTTP call, queue message, and DB query, so "everything that happened for order #123" becomes one connected timeline across all 5 services — instead of grepping five log files and guessing at timestamps.
+A trace ID generated at the Gateway propagates through every HTTP call, queue message, and DB query, so "everything that happened for order #123" becomes one connected timeline across all six services — instead of grepping six log files and guessing at timestamps. The ID travels in the W3C `traceparent` header: on HTTP requests, in RabbitMQ message headers, and in the outbox row, so an event published seconds later by the relay still joins the request that caused it.
 
 ## 6. Security design
 
@@ -352,8 +355,10 @@ distributed-commerce-payments-engine/
 │   │   │   │   └── rate_limit.py       # token bucket dependency
 │   │   │   └── proxy/                  # forwards requests to downstream services
 │   │   ├── tests/
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
+│   │   ├── Dockerfile                  # built from the repo root (needs libs/common)
+│   │   ├── requirements.in             # direct dependencies, edited by hand
+│   │   ├── requirements.txt            # pinned lock generated from requirements.in
+│   │   └── requirements-dev.in/.txt    # test dependencies, constrained to the runtime lock
 │   │
 │   ├── order-service/
 │   │   ├── app/
@@ -372,7 +377,9 @@ distributed-commerce-payments-engine/
 │   │   │   ├── unit/
 │   │   │   └── integration/            # testcontainers-based
 │   │   ├── Dockerfile
-│   │   └── requirements.txt
+│   │   ├── requirements.in
+│   │   ├── requirements.txt
+│   │   └── requirements-dev.in/.txt
 │   │
 │   ├── inventory-service/              # same internal layout as order-service
 │   ├── payment-service/                # same internal layout as order-service
@@ -381,8 +388,8 @@ distributed-commerce-payments-engine/
 │
 ├── libs/
 │   └── common/                         # shared code installed as local editable package
-│       ├── events/                     # shared event schema definitions (Pydantic)
-│       ├── tracing/                    # shared OpenTelemetry setup helper
+│       ├── messaging/                  # RabbitMQ publish/consume, retries, dead letters, replay CLI
+│       ├── observability/              # tracing, Prometheus metrics, JSON logs: setup_observability()
 │       └── auth/                       # shared JWT verification helper (for services behind Gateway)
 │
 ├── frontend/
@@ -393,21 +400,31 @@ distributed-commerce-payments-engine/
 │   │   ├── hooks/                      # useOrders(), useLiveUpdates(), etc.
 │   │   ├── store/                      # Zustand store
 │   │   └── App.tsx
+│   ├── nginx/default.conf.template     # serves the build, proxies /api and /ws to the Gateway
+│   ├── Dockerfile
 │   ├── package.json
 │   └── vite.config.ts
 │
 ├── infra/
-│   ├── docker-compose.yml              # postgres, redis, rabbitmq, otel-collector, prometheus, grafana + all services
-│   ├── otel-collector-config.yaml
-│   ├── prometheus.yml
+│   ├── docker-compose.yml              # postgres, redis, rabbitmq, jaeger, prometheus, grafana
+│   ├── docker-compose.app.yml          # overlay: every service, its migration job, the dashboard
+│   ├── prometheus/
+│   │   ├── prometheus.yml              # scrape config; targets come from targets/
+│   │   ├── targets/                    # host.yml (uvicorn on the host) or compose.yml (containers)
+│   │   └── alerts.yml                  # alert rules
 │   └── grafana/
-│       └── dashboards/
+│       ├── provisioning/               # datasources + dashboard provider, loaded at startup
+│       └── dashboards/                 # commerce-overview.json
+│
+├── scripts/
+│   ├── lock_requirements.py            # regenerates every requirements lock with uv
+│   └── smoke_test.py                   # end-to-end order through a running stack
 │
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                      # lint + test + build, gates merges
+│       └── ci.yml                      # tests, lock check, end-to-end in containers; gates merges
 │
-├── .env.example
+├── .dockerignore
 ├── .gitignore
 └── README.md
 ```
@@ -430,13 +447,30 @@ This is what separates a "mature" codebase from a fresher one: **routers never c
 
 ## 8. Local dev environment
 
-`infra/docker-compose.yml` brings up: `postgres`, `redis`, `rabbitmq`, `otel-collector`, `prometheus`, `grafana`, plus one container per service in `services/`, plus the `frontend`. Single command: `docker-compose up --build` from `infra/`. Exact service names/ports get filled in here once the compose file exists.
+Copy `infra/.env.example` to `infra/.env` first. There are two ways to run the system:
+
+**Everything in containers** (a demo, or checking the images):
+
+```
+cd infra
+docker compose -f docker-compose.yml -f docker-compose.app.yml up --build
+```
+
+Then open http://localhost:8080 and sign in as `admin@example.com` / `admin-pass-123`. The overlay adds one container per service, a one-off migration job per service (each service starts only after its job exits successfully), and the dashboard. Only the dashboard is published: its nginx serves the build and proxies `/api` and `/ws` to the Gateway, which is the only way in, exactly as in production. `python scripts/smoke_test.py` places an order through port 8080 and waits for the saga to fulfil it; CI runs the same check on every PR.
+
+**Services on the host** (day-to-day development): `docker compose up -d` from `infra/` starts only the infrastructure; then run each service with uvicorn from its own virtualenv (`pip install -r requirements-dev.txt`). Ports: Order 8000, Gateway 8001, Inventory 8002, Payment 8003, Notification 8004, Recommendation 8005.
+
+**Observability** (both modes): traces at http://localhost:16686 (Jaeger), metrics and alerts at http://localhost:9090 (Prometheus), and the "Commerce overview" dashboard at http://localhost:3000 (Grafana, no login). Prometheus reads its targets from a file: the base compose file mounts `targets/host.yml` (services reached through `host.docker.internal`), and the overlay mounts `targets/compose.yml` (service names) over the same path.
+
+**Dependencies:** each `requirements.in` lists a service's direct dependencies; `requirements.txt` is the fully pinned lock that images, CI and virtualenvs all install. After editing a `.in` file, run `python scripts/lock_requirements.py` (needs `pip install uv`); add `--upgrade` to move every pin to the newest allowed version. CI fails if a lock is out of date.
 
 **Admin dashboard:** `cd frontend && npm install && npm run dev`, then open http://localhost:5173 and sign in as an admin. The Vite dev server proxies `/api` and `/ws` to the Gateway on port 8001 (override with `GATEWAY_URL`), so the browser sees one origin and no CORS setup is needed. `npm test` runs the Vitest suite; `npm run build` type-checks and produces `frontend/dist/`.
 
 ## 9. Deployment architecture
 
 - Each service is its own Docker image, deployed as an independent Render/Railway service. Notification and Recommendation are consumer-only (no public traffic needed beyond a `/health` check).
+- Images listen on `$PORT` (defaulting to the service's local port), because hosting platforms assign the port. They run as a non-root user, carry a `HEALTHCHECK` on `/health`, and install only the pinned runtime lock.
+- Migrations run once per release, before the new version starts: as the one-off `<service>-migrate` job in Compose, and as the platform's pre-deploy command (`alembic upgrade head`, same image) in production. Never at service startup, where several replicas would race to migrate.
 - Inter-service URLs are **environment-variable-driven** (e.g., `ORDER_SERVICE_URL`), never hardcoded — this is what lets the exact same code run against Docker Compose service names locally and against real public/internal URLs in production.
 - Postgres/Redis/RabbitMQ: containers locally (via Compose), managed free-tier instances in production (Neon for Postgres, Upstash for Redis, CloudAMQP for RabbitMQ) — same connection string interface either way, swapped via env vars.
 - Frontend deployed to Vercel, pointed at the Gateway's public URL.
@@ -445,16 +479,63 @@ This is what separates a "mature" codebase from a fresher one: **routers never c
 
 ## 10. Observability
 
-- **Metrics (Prometheus):** `http_requests_total`, `http_request_duration_seconds`, `order_status_transitions_total{status}`, `inventory_reservation_conflicts_total`, `payment_attempts_total{result}`, `outbox_publish_lag_seconds`.
-- **Traces (OpenTelemetry):** one trace per inbound request; a span per service hop, per DB query, and per MQ publish/consume — so a single order's full path is one connected timeline.
-- **Dashboards (Grafana):** "Order Pipeline Health" (throughput/failure rate by stage), "Payment Correctness" (idempotency hit rate, ledger balance sanity), "System Latency" (p50/p95/p99 per service).
-- **Logs:** structured JSON, correlated with trace ID, so a log line can always be tied back to the trace that produced it.
+Every service calls `setup_observability(app, service_name=..., settings=settings, engine=engine)` from `commerce_common.observability` once, right after creating the app. Configuration comes from `ObservabilitySettings`, which each service's `Settings` extends:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Base URL of an OTLP/HTTP receiver (`http://localhost:4318` for the local Jaeger). Unset means spans are still created, so logs carry trace IDs, but nothing is exported. |
+| `TRACE_SAMPLE_RATIO` | `1.0` | Fraction of new traces kept. Downstream services follow the caller's decision, so a trace is never half-recorded. |
+| `LOG_FORMAT` | `text` | `json` for one JSON object per line (containers, log platforms). |
+| `LOG_LEVEL` | `INFO` | Root log level. |
+
+### Traces
+
+- **HTTP:** FastAPI server spans named after the route template (`POST /orders`), and httpx client spans whose `traceparent` header makes the next service continue the same trace (only in services that install httpx: the Gateway and Order Service). `/health*`, `/metrics` and the dashboard WebSocket are not traced. A socket that stays open for hours as one span would only hide the useful ones.
+- **Database:** one span per SQL statement (SQLAlchemy instrumentation).
+- **RabbitMQ:** `publish_event` opens a PRODUCER span (`order.created publish`) and writes `traceparent` into the message headers. Each consumer opens a CONSUMER span (`order.created process`) as a child of it, recording the retry count and any exception. A message that is retried or dead-lettered shows up as a failed span on the original trace.
+- **Outbox:** the outbox row stores the trace context of the transaction that wrote it (`outbox.trace_context`), and the relay publishes with that context. The event therefore joins the originating request's trace even though the relay publishes it later from a background thread.
+- **Sampling:** `ParentBased(SkipUnparentedClientSpans(TraceIdRatioBased(ratio)))`. Background loops (the outbox relay's polling query, the reconciler) would otherwise produce a one-span trace every second. Those are database CLIENT spans with no parent, so they are dropped, while anything started by a request or a message is kept.
+
+One order placed through the Gateway produces a single trace of roughly 90 spans across all six services: the HTTP request, then each saga step over RabbitMQ through to the notification.
+
+### Metrics
+
+Each service serves Prometheus text format on `GET /metrics` (excluded from the OpenAPI schema).
+
+| Metric | Labels | Source |
+|---|---|---|
+| `http_requests_total`, `http_request_duration_seconds`, `http_requests_in_progress` | `method`, `route`, `status` | every service. `route` is the template (`/orders/{order_id}`), never the raw path, so IDs cannot explode the series count. Unmatched paths are `unmatched`. |
+| `messages_published_total` | `routing_key` | every publisher |
+| `messages_consumed_total` | `queue`, `routing_key`, `outcome` = `success` / `retried` / `dead_lettered` / `dropped` | every consumer |
+| `message_handler_duration_seconds` | `queue`, `routing_key` | every consumer |
+| `order_status_transitions_total` | `from_status`, `to_status` (`none` on creation) | Order: counted from SQLAlchemy session events after commit, so every code path is covered and rolled-back changes are never counted |
+| `outbox_publish_lag_seconds` | | Order relay: commit → publish delay |
+| `order_reconciler_actions_total` | | Order reconciler |
+| `payment_attempts_total` | `result` | Payment (idempotent replays excluded) |
+| `payment_idempotent_replays_total`, `payment_refunds_total`, `payment_captured_amount_total` | | Payment |
+| `inventory_reservation_requests_total` | `result` = `reserved` / `replayed` / `insufficient_stock` / `product_not_found` | Inventory |
+| `inventory_reservations_settled_total` | `outcome` = `committed` / `released` | Inventory, per reservation row |
+| `notifications_sent_total` | `channel` | Notification |
+| `gateway_upstream_requests_total`, `gateway_upstream_request_duration_seconds` | `upstream`, `outcome` (status code, `timeout`, `unavailable`) | Gateway proxy |
+| `gateway_rate_limit_decisions_total` | `limiter`, `decision` = `allowed` / `limited` / `fail_open` | Gateway |
+| `gateway_dashboard_connections`, `gateway_dashboard_clients_dropped_total` | | Gateway WebSocket hub |
+
+Prometheus adds a `service` label from the scrape target, which is why no application metric uses a label of that name.
+
+**Alerts** (`infra/prometheus/alerts.yml`): `ServiceDown`, `HighServerErrorRate` (more than 5% of requests return 5xx for 5 minutes), `MessagesDeadLettered` (any message parked in a DLQ; the annotation names the replay command), `OutboxPublishLagHigh` (p95 above 10 s), and `RateLimiterFailingOpen` (Redis unreachable, so throttling is off).
+
+**Dashboard** (Grafana, "Commerce overview"): per-service request rate, 5xx ratio and p95 latency; order transitions; payment success rate and captured amount; reservation results; messages by outcome, dead letters, outbox lag and handler latency; upstream responses, rate-limit decisions and dashboard sockets.
+
+### Logs
+
+Every record carries the active trace ID: `[trace=<id>]` in text mode, `trace_id` / `span_id` fields in JSON mode. A log line can be pasted into Jaeger's search to open the trace that produced it. In JSON mode, uvicorn's own loggers are routed through the same handler, so a container emits only JSON. Connection-level INFO chatter from `pika` and `httpx` is suppressed at the default level and returns with `LOG_LEVEL=DEBUG`.
 
 ## 11. Testing strategy
 
 - **Unit tests** (`services/*/tests/unit/`) — business logic and schema validation in isolation (order totals, state transitions, rate limiter math), no DB or broker. Must stay fast enough to run on every save; the Order Service suite runs in ~0.1s.
 - **Integration tests** (`services/*/tests/integration/`) — a throwaway Postgres/Redis/RabbitMQ per session via `testcontainers`, proving the FRs in the PRD (e.g., fire concurrent requests, assert exactly one succeeds). Marked `integration` so the fast loop can be run with `pytest -m "not integration"`.
 - **CI** (`.github/workflows/ci.yml`) — runs the full suite on every push to `main` and every PR; merges blocked on failure. Services are a build matrix, so adding a service is a one-line change.
+- **End-to-end** (`scripts/smoke_test.py`, the CI `e2e` job) — builds every image, starts the whole stack with the Compose overlay, and places an order through the dashboard's proxy while watching the live socket. The only check that covers the Dockerfiles, migration jobs, Compose wiring and nginx config together.
 
 Three rules the Order Service suite establishes for every service that follows:
 
@@ -492,7 +573,7 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | `idempotency_key` required, not optional | An optional key would let a caller silently opt out of the exactly-once guarantee the PRD promises; making it mandatory pushes retry-safety onto every client by construction | ✅ Decided |
 | Replayed request returns `200`, not `201` | `201 Created` would assert that a resource was created, which is false on a replay; the caller still receives the order, correctly labelled as pre-existing | ✅ Decided |
 | Integration tests use `testcontainers`, not a shared test database | A throwaway container per session means tests never depend on machine state or leftover rows, and CI needs no pre-provisioned database | ✅ Decided |
-| Test dependencies split into `requirements-dev.txt` | Production images should not ship `pytest`, `httpx`, or the Docker client library used by `testcontainers` | ✅ Decided |
+| Test dependencies split into `requirements-dev.txt` | Production images should not ship `pytest`, `httpx` (in services that make no HTTP calls), or the Docker client library used by `testcontainers` | ✅ Decided |
 | `alembic.ini` ships with no `sqlalchemy.url` | The connection string is resolved in `env.py` from the environment, so no credentials are committed and tests can point migrations at a throwaway database | ✅ Decided |
 | JWT access tokens signed with HS256 (shared secret) | Simplest correct option for a solo monorepo; rotate to RS256 later if key distribution becomes a real concern | ✅ Decided |
 | Opaque refresh tokens hashed in the Gateway DB, rotated on use | Stolen refresh tokens can be revoked; rotation means a leaked token works at most once | ✅ Decided |
@@ -524,6 +605,23 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Retry delays via one TTL queue per delay, not per-message expiry | RabbitMQ only expires the message at the head of a queue, so mixed per-message delays block each other; one TTL per queue keeps every delay exact | ✅ Decided |
 | Retry state in message headers, moved by the consumer, not `x-dead-letter-exchange` on the work queue | Existing queues keep their arguments (RabbitMQ rejects redeclaring with new ones), and the consumer can record the error and attempt count on the message | ✅ Decided |
 | Retry/dead-letter copy confirmed by the broker before the original is acked | The worst case becomes a duplicate (handled by idempotent handlers) rather than a lost event | ✅ Decided |
+| Services export traces straight to Jaeger over OTLP/HTTP, without an OpenTelemetry Collector | One less container locally. The exporter speaks standard OTLP, so adding a collector later (for tail sampling or a second backend) is a change to one environment variable | ✅ Decided |
+| Jaeger pinned to 2.20 | 2.21 removed the v1 HTTP query API that Grafana's Jaeger datasource still calls; revisit when Grafana supports the v3 API | ✅ Decided |
+| Trace context stored on the outbox row | The relay publishes later from another thread; without the stored context every saga event would start a disconnected trace | ✅ Decided |
+| Root database spans dropped by the sampler | Polling loops would otherwise flood the trace store with one-span traces; anything started by a request or message is unaffected | ✅ Decided |
+| Order transitions counted from SQLAlchemy session events after commit | Status changes come from event handlers, the reconciler and the HTTP fallback; counting at the session catches all of them and never reports a rolled-back change | ✅ Decided |
+| HTTP metrics labelled by route template, not raw path | Raw paths contain IDs, so every order would create new time series and eventually exhaust Prometheus memory | ✅ Decided |
+| Domain counters incremented only after commit | A metric that counts work later rolled back disagrees with the database; replays and no-op calls are counted separately or not at all | ✅ Decided |
+| Every dependency pinned in a lock compiled from `requirements.in`, not unpinned requirements | Unpinned files resolve to whatever is newest on the day of the install, so images, CI and laptops silently ran different versions; the first image build got SQLAlchemy 2.1, which the tracing instrumentation refuses, and lost every database span | ✅ Decided |
+| Universal locks generated with `uv pip compile --universal` | One lock carries platform markers, so the same file installs on the Linux images and on Windows or macOS dev machines; pip-tools resolves for the machine it runs on and would drop Linux-only packages such as `uvloop` | ✅ Decided |
+| SQLAlchemy capped below 2.1 in `commerce-common` | The library that ships the SQLAlchemy instrumentation states the bound it needs, once, instead of six services repeating it | ✅ Decided |
+| One Dockerfile per service, built from the repository root | Each image needs the shared library, and a hosting platform builds one service from one Dockerfile path; a per-service file is explicit and can diverge without build arguments | ✅ Decided |
+| Base images pinned to the level where breaking changes happen (`python:3.11-slim-trixie`, `node:22-alpine`, `nginx-unprivileged:1.30-alpine`) | Patch and security updates arrive on rebuild, while a Python, Debian, Node or nginx major or minor upgrade is always a deliberate change | ✅ Decided |
+| Migrations as a one-off job per service, not at service startup | Replicas starting together would race to migrate, and a failed migration should stop the release rather than leave half the replicas crash-looping | ✅ Decided |
+| Only the dashboard published by the Compose overlay; it proxies `/api` and `/ws` | One origin means no CORS, the Gateway is reachable only through nginx, and nginx overwrites `X-Forwarded-For`, so the Gateway can trust the header for rate limiting without letting clients choose their own bucket | ✅ Decided |
+| Dashboard nginx resolves the Gateway through a variable and the container's resolver | A literal `proxy_pass` host is resolved once at startup; a restarted Gateway comes back with a new IP and nginx would keep sending traffic to the old one | ✅ Decided |
+| Prometheus targets from a file selected by the Compose file | The same scrape config serves services on the host and services in containers; the overlay replaces one mounted file instead of maintaining a second config | ✅ Decided |
+| End-to-end smoke test in CI | Unit and integration tests run outside the images, so a broken Dockerfile, migration job, Compose variable or proxy rule would otherwise reach `main` unnoticed | ✅ Decided |
 | Mocked payment gateway interface shape | `charge(amount) -> bool`, `refund(amount)` | ✅ Decided |
 
 ## 14. Risks

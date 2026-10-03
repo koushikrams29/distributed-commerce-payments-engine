@@ -1,0 +1,12 @@
+# Direct dependencies. requirements.txt is the pinned lock generated from this
+# file: run `python scripts/lock_requirements.py` from the repository root after editing.
+-e ../../libs/common
+fastapi
+uvicorn[standard]
+pydantic-settings
+sqlalchemy
+psycopg2-binary
+alembic
+python-multipart
+httpx
+redis>=5

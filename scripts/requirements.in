@@ -1,0 +1,4 @@
+# Needed by smoke_test.py. requirements.txt is the pinned lock generated from
+# this file: run `python scripts/lock_requirements.py` after editing.
+httpx
+websockets
