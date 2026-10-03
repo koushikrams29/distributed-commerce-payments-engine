@@ -1,0 +1,5 @@
+-e .
+
+pytest
+# Upper bound matches the services: a major bump has moved container modules before.
+testcontainers[rabbitmq]>=4.15,<5
