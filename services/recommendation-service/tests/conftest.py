@@ -10,6 +10,8 @@ os.environ.setdefault(
 )
 os.environ.setdefault("JWT_SECRET", "test-secret-at-least-32-characters-long")
 os.environ.setdefault("USE_EVENT_BUS", "false")
+# Spans are still created (logs get trace IDs) but never exported from tests.
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
 
 import pytest
 from alembic import command

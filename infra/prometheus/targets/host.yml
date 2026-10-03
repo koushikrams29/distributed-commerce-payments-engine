@@ -1,0 +1,13 @@
+# Services running on the host (uvicorn), reached through the Docker host gateway.
+- targets: ["host.docker.internal:8000"]
+  labels: { service: order-service }
+- targets: ["host.docker.internal:8001"]
+  labels: { service: gateway }
+- targets: ["host.docker.internal:8002"]
+  labels: { service: inventory-service }
+- targets: ["host.docker.internal:8003"]
+  labels: { service: payment-service }
+- targets: ["host.docker.internal:8004"]
+  labels: { service: notification-service }
+- targets: ["host.docker.internal:8005"]
+  labels: { service: recommendation-service }

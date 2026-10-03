@@ -4,6 +4,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.core.metrics import DASHBOARD_CLIENTS_DROPPED, DASHBOARD_CONNECTIONS
+
 logger = logging.getLogger(__name__)
 
 Message = dict[str, Any]
@@ -39,11 +41,17 @@ class DashboardHub:
         )
         with self._lock:
             self._subscriptions.add(subscription)
+        DASHBOARD_CONNECTIONS.inc()
         return subscription
 
     def unsubscribe(self, subscription: Subscription) -> None:
+        # Called twice for a dropped slow client (on overflow, then when its
+        # socket handler exits); only the first call may move the gauge.
         with self._lock:
+            removed = subscription in self._subscriptions
             self._subscriptions.discard(subscription)
+        if removed:
+            DASHBOARD_CONNECTIONS.dec()
 
     @property
     def subscriber_count(self) -> int:
@@ -67,6 +75,7 @@ class DashboardHub:
             subscription.queue.put_nowait(message)
         except asyncio.QueueFull:
             logger.warning("dashboard client too slow; disconnecting it")
+            DASHBOARD_CLIENTS_DROPPED.inc()
             self.unsubscribe(subscription)
             while not subscription.queue.empty():
                 subscription.queue.get_nowait()

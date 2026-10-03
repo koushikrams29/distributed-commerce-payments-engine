@@ -1,0 +1,13 @@
+# Services running as containers (docker-compose.app.yml), reached by service name.
+- targets: ["order-service:8000"]
+  labels: { service: order-service }
+- targets: ["gateway:8001"]
+  labels: { service: gateway }
+- targets: ["inventory-service:8002"]
+  labels: { service: inventory-service }
+- targets: ["payment-service:8003"]
+  labels: { service: payment-service }
+- targets: ["notification-service:8004"]
+  labels: { service: notification-service }
+- targets: ["recommendation-service:8005"]
+  labels: { service: recommendation-service }

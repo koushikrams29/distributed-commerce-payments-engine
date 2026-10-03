@@ -20,6 +20,8 @@ os.environ["REFRESH_TOKEN_EXPIRE_DAYS"] = "7"
 # everywhere else it would only make tests depend on a Redis being reachable.
 os.environ["RATE_LIMIT_ENABLED"] = "false"
 os.environ["DASHBOARD_EVENTS_ENABLED"] = "false"
+# Spans are still created (logs get trace IDs) but never exported from tests.
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
 
 import pytest
 from alembic import command

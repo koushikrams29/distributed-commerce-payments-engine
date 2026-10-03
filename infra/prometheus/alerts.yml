@@ -1,0 +1,49 @@
+groups:
+  - name: commerce
+    rules:
+      - alert: ServiceDown
+        expr: up{job="commerce"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is not answering /metrics"
+
+      - alert: HighServerErrorRate
+        expr: |
+          sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
+            / sum by (service) (rate(http_requests_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }}: more than 5% of requests fail with 5xx"
+
+      - alert: MessagesDeadLettered
+        expr: sum by (service, queue) (increase(messages_consumed_total{outcome="dead_lettered"}[10m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }}: messages dead-lettered on {{ $labels.queue }}"
+          description: >-
+            Inspect with the RabbitMQ UI and replay with
+            `python -m commerce_common.messaging.replay {{ $labels.queue }}` once fixed.
+
+      - alert: OutboxPublishLagHigh
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(outbox_publish_lag_seconds_bucket[5m]))) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Order events wait more than 10s (p95) in the outbox before publishing"
+          description: The relay is slow or RabbitMQ is unreachable; the saga stalls meanwhile.
+
+      - alert: RateLimiterFailingOpen
+        expr: sum by (limiter) (increase(gateway_rate_limit_decisions_total{decision="fail_open"}[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rate limiter {{ $labels.limiter }} cannot reach Redis and is allowing all requests"

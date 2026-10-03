@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.metrics import NOTIFICATIONS_SENT
 from app.models import Notification, NotificationChannel, NotificationStatus
 from app.repositories.notification_repository import NotificationRepository
 
@@ -51,6 +52,7 @@ class NotificationService:
                 raise
             return existing, False
 
+        NOTIFICATIONS_SENT.labels(channel).inc()
         self.db.refresh(notification)
         logger.info(
             "fake %s confirmation sent for order=%s notification=%s",

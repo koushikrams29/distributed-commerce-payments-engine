@@ -1,7 +1,9 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
+
+from commerce_common.observability import ObservabilitySettings
 
 
-class Settings(BaseSettings):
+class Settings(ObservabilitySettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     database_url: str

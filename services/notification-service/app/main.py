@@ -4,8 +4,10 @@ from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from commerce_common.observability import setup_observability
+
 from app.core.config import settings
-from app.core.db import get_db
+from app.core.db import engine, get_db
 from app.events.consumers import start_notification_event_consumers
 
 
@@ -17,6 +19,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Notification Service", version="0.1.0", lifespan=lifespan)
+setup_observability(app, service_name="notification-service", settings=settings, engine=engine)
 
 
 @app.get("/health")

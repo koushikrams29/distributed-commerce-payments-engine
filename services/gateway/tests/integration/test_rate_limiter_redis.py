@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator, Iterator
 
 import pytest
 import pytest_asyncio
+from prometheus_client import REGISTRY
 from redis.asyncio import Redis
 
 from app.services.rate_limiter import TokenBucketLimiter
@@ -42,6 +43,23 @@ async def test_allows_a_full_burst_then_rejects(redis: Redis) -> None:
     assert [r.remaining for r in results[:3]] == [2, 1, 0]
     assert results[3].retry_after_seconds >= 1
     assert results[3].headers()["Retry-After"] == str(results[3].retry_after_seconds)
+
+
+@pytest.mark.asyncio
+async def test_decisions_are_counted(redis: Redis) -> None:
+    def count(decision: str) -> float:
+        return REGISTRY.get_sample_value(
+            "gateway_rate_limit_decisions_total", {"limiter": "test", "decision": decision}
+        ) or 0.0
+
+    limiter = _limiter(redis, capacity=2, refill_per_second=0.01)
+    allowed, limited = count("allowed"), count("limited")
+
+    for _ in range(3):
+        await limiter.consume("user-1")
+
+    assert count("allowed") == allowed + 2
+    assert count("limited") == limited + 1
 
 
 @pytest.mark.asyncio

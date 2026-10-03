@@ -5,6 +5,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.metrics import RESERVATION_REQUESTS, RESERVATIONS_SETTLED
 from app.models import Product, ReservationStatus, StockReservation
 from app.repositories.inventory_repository import (
     ProductRepository,
@@ -59,6 +60,7 @@ class InventoryService:
             # Idempotent: a replayed order_id returns its rows whatever their
             # status. Checking only held rows would re-deduct stock for an
             # order that was already committed or released.
+            RESERVATION_REQUESTS.labels("replayed").inc()
             return existing
 
         # Lock products in a stable order to avoid deadlocks between requests
@@ -73,9 +75,11 @@ class InventoryService:
             product = self.products.get_by_id_for_update(item.product_id)
             if product is None:
                 self.db.rollback()
+                RESERVATION_REQUESTS.labels("product_not_found").inc()
                 raise ProductNotFoundError(item.product_id)
             if product.stock_qty < item.qty:
                 self.db.rollback()
+                RESERVATION_REQUESTS.labels("insufficient_stock").inc()
                 raise InsufficientStockError(
                     item.product_id, item.qty, product.stock_qty
                 )
@@ -92,6 +96,7 @@ class InventoryService:
             created.append(reservation)
 
         self.db.commit()
+        RESERVATION_REQUESTS.labels("reserved").inc()
         for reservation in created:
             self.db.refresh(reservation)
         return created
@@ -107,6 +112,7 @@ class InventoryService:
         for reservation in held:
             reservation.status = ReservationStatus.COMMITTED.value
         self.db.commit()
+        RESERVATIONS_SETTLED.labels("committed").inc(len(held))
         return len(held)
 
     def release_for_order(self, order_id: uuid.UUID) -> int:
@@ -134,6 +140,7 @@ class InventoryService:
             reservation.status = ReservationStatus.RELEASED.value
 
         self.db.commit()
+        RESERVATIONS_SETTLED.labels("released").inc(len(held))
         return len(held)
 
     def ensure_product(

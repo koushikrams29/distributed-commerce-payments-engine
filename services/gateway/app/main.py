@@ -8,10 +8,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from commerce_common.auth import Role
+from commerce_common.observability import setup_observability
 
 from app.api.routers import auth, dashboard, proxy
 from app.core.config import settings
-from app.core.db import SessionLocal, get_db
+from app.core.db import SessionLocal, engine, get_db
 from app.realtime.events import start_dashboard_event_relay
 from app.realtime.hub import DashboardHub
 from app.services.auth_service import AuthService
@@ -78,6 +79,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Gateway Service", version="0.1.0", lifespan=lifespan)
+setup_observability(
+    app,
+    service_name="gateway",
+    settings=settings,
+    engine=engine,
+    # A dashboard socket stays open for hours; one span that long is useless.
+    untraced_paths=("ws/dashboard",),
+)
 if settings.cors_allowed_origins:
     # Only needed when the dashboard is served from another origin (e.g. a
     # CDN); in local dev the Vite proxy makes it same-origin.

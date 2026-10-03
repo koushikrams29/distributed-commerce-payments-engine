@@ -1,0 +1,11 @@
+# Test dependencies. The constraint keeps runtime packages at the versions in
+# requirements.txt, so tests run against exactly what the image ships.
+-r requirements.in
+-c requirements.txt
+
+pytest
+pytest-asyncio
+httpx
+# Upper bound: 4.x moved the Postgres container to testcontainers.community,
+# so a major bump would break tests/conftest.py imports.
+testcontainers[postgres]>=4.15,<5

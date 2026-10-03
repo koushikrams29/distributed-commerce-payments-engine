@@ -18,6 +18,8 @@ os.environ.setdefault("JWT_SECRET", "test-secret-at-least-32-characters-long")
 os.environ.setdefault("INVENTORY_SERVICE_URL", "http://inventory.test")
 os.environ.setdefault("PAYMENT_SERVICE_URL", "http://payment.test")
 os.environ.setdefault("USE_EVENT_BUS", "false")
+# Spans are still created (logs get trace IDs) but never exported from tests.
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""
 os.environ.setdefault("RECONCILE_ENABLED", "false")
 
 import pytest

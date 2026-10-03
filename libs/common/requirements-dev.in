@@ -1,0 +1,10 @@
+# Test dependencies. Regenerate requirements-dev.txt with
+# `python scripts/lock_requirements.py` from the repository root after editing.
+-e .
+
+pytest
+# The observability helpers wrap FastAPI apps; the services provide these at runtime.
+fastapi
+httpx
+# Upper bound matches the services: a major bump has moved container modules before.
+testcontainers[rabbitmq]>=4.15,<5

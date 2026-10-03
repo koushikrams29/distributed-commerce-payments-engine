@@ -42,5 +42,60 @@ services:
       timeout: 3s
       retries: 5
 
+  # Traces: services export OTLP over HTTP straight to Jaeger (no collector in
+  # between). In-memory storage, so traces are lost when the container restarts.
+  jaeger:
+    # 2.21 removed the v1 HTTP query API that Grafana's Jaeger datasource calls.
+    image: jaegertracing/jaeger:2.20.0
+    container_name: commerce-jaeger
+    restart: unless-stopped
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "16686:16686" # UI
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    container_name: commerce-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      # POST /-/reload picks up edited config or rules without a restart.
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      # Docker Desktop provides host.docker.internal; Linux engines need this.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      # docker-compose.app.yml mounts targets/compose.yml at the same path instead.
+      - ./prometheus/targets/host.yml:/etc/prometheus/targets/commerce.yml:ro
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    container_name: commerce-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - jaeger
+    environment:
+      # Local use only: dashboards are readable without logging in.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/commerce-overview.json
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+
 volumes:
   postgres_data:
+  prometheus_data:
+  grafana_data:

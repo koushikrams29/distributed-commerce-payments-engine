@@ -1,0 +1,7 @@
+node_modules
+dist
+# Vite reads .env files at build time; a developer's local overrides must not
+# end up baked into the image.
+.env
+.env.*
+!.env.example

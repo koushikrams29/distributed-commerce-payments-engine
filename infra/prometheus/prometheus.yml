@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # Where the services live depends on how they run: targets/host.yml when
+  # they run on the host (uvicorn), targets/compose.yml when they run in
+  # containers (docker-compose.app.yml). The compose files mount one of the two here.
+  - job_name: commerce
+    metrics_path: /metrics
+    file_sd_configs:
+      - files: [/etc/prometheus/targets/*.yml]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
