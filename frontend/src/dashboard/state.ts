@@ -1,6 +1,8 @@
 import { isOrderStatus, type DashboardEvent, type Order, type OrderStatus } from "../types";
 
-export const FEED_LIMIT = 60;
+// Enough history for the event console to filter and correlate a burst of
+// orders; each entry is a few hundred bytes.
+export const FEED_LIMIT = 500;
 export const ORDER_LIMIT = 200;
 
 export interface FeedEntry {

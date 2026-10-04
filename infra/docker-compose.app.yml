@@ -74,6 +74,10 @@ services:
       INVENTORY_SERVICE_URL: http://inventory-service:8002
       PAYMENT_SERVICE_URL: http://payment-service:8003
       RECOMMENDATION_SERVICE_URL: http://recommendation-service:8005
+      # Not proxied; only polled for the admin console's service health view.
+      NOTIFICATION_SERVICE_URL: http://notification-service:8004
+      # Queue depths for the admin console; signs in with RABBITMQ_URL's credentials.
+      RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
       REDIS_URL: redis://redis:6379/0
       # Read the client IP from X-Forwarded-For (the rate limiter keys on it).
       # Safe only because the gateway is not published: every request arrives

@@ -10,7 +10,7 @@
 
 ## 1. What this is and why it exists
 
-An event-driven microservices backend that simulates the core of an e-commerce and payments system: order lifecycle, inventory reservation under concurrency, idempotent payments with a ledger, notifications, and co-purchase recommendations — plus a live admin dashboard that shows the saga as it happens. The services are wired together with the reliability patterns that separate a CRUD demo from a system that could survive production traffic: a transactional outbox, idempotency keys backed by unique constraints, row-level locking, bounded retries with dead-letter queues, rate limiting, and distributed tracing.
+An event-driven microservices backend that simulates the core of an e-commerce and payments system: order lifecycle, inventory reservation under concurrency, idempotent payments with a ledger, notifications, and co-purchase recommendations — plus an operations console that shows each saga as it happens and lets an operator act on failures. The services are wired together with the reliability patterns that separate a CRUD demo from a system that could survive production traffic: a transactional outbox, idempotency keys backed by unique constraints, row-level locking, bounded retries with dead-letter queues, rate limiting, and distributed tracing.
 
 This project exists to prove one thing under adversarial interview questioning: **I can design and operate a coherent distributed system, not just six apps that happen to share a database.** Every service follows the same auth, observability, testing and deployment conventions on purpose — the goal is architectural depth, not surface area.
 
@@ -77,13 +77,13 @@ _Summarised here; the full log with reasoning (60+ entries) is in [`docs/ARCHITE
 - **Payment Service** (mocked gateway) — at most one charge per order, refunds, and an append-only debit/credit ledger.
 - **Notification Service** — consumes `order.fulfilled` and records a (fake) confirmation email, once per order.
 - **Recommendation Service** — counts how often products are bought together from paid orders and serves "frequently bought with" lists.
-- **Admin dashboard** (React + TypeScript) — live event feed, order table, stock levels and headline metrics, merged correctly whatever order events arrive in.
+- **Operations console** (React + TypeScript, no UI framework) — answers "is the system healthy right now?" from service health, queue depths, outbox lag and overdue orders; searchable orders with a per-order saga view and a timeline merged from every service's records; a filterable live event console; the payment ledger; stock flow from available to reserved to committed; and dead-letter inspection with confirmed replay. Every trace ID links to Jaeger.
 
 ## 6. Reliability and operations
 
 - **Tracing:** one trace follows an order from the HTTP request through the outbox, RabbitMQ and every consumer down to the SQL statements; log lines carry the trace ID.
 - **Metrics:** Prometheus scrapes every service; the provisioned Grafana dashboard covers HTTP latency and errors, order transitions, payment success rate, stock reservations, message outcomes, dead letters, outbox lag and rate-limit decisions.
-- **Failure handling:** delayed retries, dead-letter queues with a replay command, a reconciler for stuck orders, and refunds for late charges.
+- **Failure handling:** delayed retries, dead-letter queues that can be inspected and replayed from the console (or a CLI), a reconciler for stuck orders, and refunds for late charges.
 - **Security:** bcrypt passwords, short-lived access tokens, hashed rotating refresh tokens, and every service verifying the JWT itself (defense in depth); only the dashboard's nginx is exposed.
 
 ## 7. Tech stack
@@ -109,9 +109,9 @@ To put it on the internet over HTTPS on a free Oracle Cloud server, follow [`doc
 Every pull request runs, in GitHub Actions:
 
 - **Unit and integration tests** for each service and the shared library. Integration tests start throwaway Postgres, Redis and RabbitMQ containers and apply the real migrations, so they prove the requirements against real infrastructure — for example, that concurrent reservations never oversell and that a redelivered charge never charges twice.
-- **A branch-coverage gate** of 85% per project; each run's coverage tables appear on its summary page. Every project is currently between 88% and 95%.
+- **A branch-coverage gate** of 85% per project; each run's coverage tables appear on its summary page. Every project is currently between 91% and 96%.
 - **A dependency-lock check**, so the images, CI and laptops always install identical versions.
 - **An end-to-end test** that builds every image, starts the whole stack and places an order through the dashboard's proxy while watching the live event stream.
-- **The dashboard's tests and type-checked build.**
+- **The console's tests and type-checked build**, including unit tests for how it derives saga state, system health and order timelines.
 
 The testing strategy and its rules are described in [ARCHITECTURE §11](./docs/ARCHITECTURE.md#11-testing-strategy).

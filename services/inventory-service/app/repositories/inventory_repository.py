@@ -1,7 +1,6 @@
 import uuid
-from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Product, ReservationStatus, StockReservation
@@ -59,6 +58,38 @@ class ReservationRepository:
     def list_for_order(self, order_id: uuid.UUID) -> list[StockReservation]:
         stmt = select(StockReservation).where(StockReservation.order_id == order_id)
         return list(self.db.execute(stmt).scalars().all())
+
+    def quantities_by_product(self) -> dict[tuple[uuid.UUID, str], int]:
+        """Units per (product, reservation status)."""
+        stmt = select(
+            StockReservation.product_id,
+            StockReservation.status,
+            func.sum(StockReservation.qty),
+        ).group_by(StockReservation.product_id, StockReservation.status)
+        return {
+            (product_id, status): int(total)
+            for product_id, status, total in self.db.execute(stmt).all()
+        }
+
+    def list_recent(
+        self,
+        *,
+        limit: int,
+        order_id: uuid.UUID | None = None,
+        status: str | None = None,
+    ) -> list[tuple[StockReservation, str]]:
+        """Newest first, each with its product's name."""
+        stmt = (
+            select(StockReservation, Product.name)
+            .join(Product, Product.id == StockReservation.product_id)
+            .order_by(StockReservation.created_at.desc(), StockReservation.id.desc())
+            .limit(limit)
+        )
+        if order_id is not None:
+            stmt = stmt.where(StockReservation.order_id == order_id)
+        if status is not None:
+            stmt = stmt.where(StockReservation.status == status)
+        return [(reservation, name) for reservation, name in self.db.execute(stmt).all()]
 
     def list_held_for_product(self, product_id: uuid.UUID) -> list[StockReservation]:
         stmt = (

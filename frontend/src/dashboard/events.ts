@@ -44,9 +44,9 @@ export function describeEvent(event: DashboardEvent): EventDescription {
       return { title: `${order(data)} stock reserved`, detail: "Inventory", tone: "info" };
     case "inventory.failed":
       return {
-        title: `${order(data)} out of stock`,
+        title: `${order(data)} reservation rejected`,
         detail: text(data, "reason") ?? "Reservation failed",
-        tone: "warning",
+        tone: "danger",
       };
     case "inventory.committed":
       return { title: `${order(data)} stock committed`, detail: "Inventory", tone: "success" };
@@ -67,7 +67,7 @@ export function describeEvent(event: DashboardEvent): EventDescription {
     case "order.paid":
       return { title: `${order(data)} paid`, detail: "Fulfilment started", tone: "info" };
     case "order.cancelled":
-      return { title: `${order(data)} cancelled`, detail: "Compensation", tone: "danger" };
+      return { title: `${order(data)} compensation started`, detail: "Release reserved stock", tone: "warning" };
     case "order.fulfilled":
       return { title: `${order(data)} fulfilled`, detail: "Confirmation sent", tone: "success" };
     default:

@@ -1,13 +1,18 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from commerce_common.auth import AccessTokenPayload
+from commerce_common.auth import AccessTokenPayload, Role
 
 from app.core.db import get_db
-from app.core.security import get_current_user
-from app.schemas.inventory import ReserveRequest, ReserveResponse
+from app.core.security import get_current_user, require_roles
+from app.models import ReservationStatus
+from app.schemas.inventory import (
+    ReservationListResponse,
+    ReserveRequest,
+    ReserveResponse,
+)
 from app.services.inventory_service import (
     InsufficientStockError,
     InventoryService,
@@ -15,6 +20,29 @@ from app.services.inventory_service import (
 )
 
 router = APIRouter(prefix="/reservations", tags=["reservations"])
+
+_VALID_STATUSES = {s.value for s in ReservationStatus}
+
+
+@router.get("", response_model=ReservationListResponse)
+def list_reservations(
+    db: Session = Depends(get_db),
+    _admin: AccessTokenPayload = Depends(require_roles(Role.ADMIN)),
+    order_id: uuid.UUID | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Admin-only: recent reservation rows, newest first."""
+    if status_filter is not None and status_filter not in _VALID_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"status must be one of: {sorted(_VALID_STATUSES)}",
+        )
+    return ReservationListResponse(
+        items=InventoryService(db).list_reservations(
+            limit=limit, order_id=order_id, status=status_filter
+        )
+    )
 
 
 @router.post("", response_model=ReserveResponse, status_code=status.HTTP_201_CREATED)

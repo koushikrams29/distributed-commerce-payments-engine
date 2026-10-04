@@ -1,0 +1,5 @@
+{
+  "jaegerUrl": "http://localhost:16686",
+  "grafanaUrl": "http://localhost:3000",
+  "rabbitmqUrl": "http://localhost:15672"
+}

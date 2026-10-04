@@ -33,7 +33,7 @@ export function LoginForm({ onSignedIn }: Props) {
           <span className="brand__mark" aria-hidden="true" />
           <span>Commerce Ops</span>
         </div>
-        <h1 className="login__title">Sign in to the live dashboard</h1>
+        <h1 className="login__title">Sign in to the operations console</h1>
         <p className="login__subtitle">Administrator accounts only.</p>
 
         <label className="field">

@@ -36,6 +36,11 @@ services:
       # Caddy's fixed address: the only sender whose X-Forwarded-For nginx believes.
       # Not the whole subnet, which includes the bridge gateway (.1) the host uses.
       TRUSTED_PROXY: 10.250.250.3
+      # The console's tool links, through the SSH tunnel in docs/DEPLOYMENT.md.
+      # RabbitMQ's management UI has no port here, so its links are hidden.
+      JAEGER_UI_URL: http://localhost:26686
+      GRAFANA_UI_URL: http://localhost:13000
+      RABBITMQ_UI_URL: ""
     networks:
       default:
       edge:

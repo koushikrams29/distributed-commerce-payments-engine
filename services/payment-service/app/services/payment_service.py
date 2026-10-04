@@ -1,8 +1,11 @@
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from commerce_common.pagination import decode_cursor, encode_cursor
 
 from app.core.metrics import (
     PAYMENT_ATTEMPTS,
@@ -13,6 +16,7 @@ from app.core.metrics import (
 from app.gateway.mock import MockPaymentGateway
 from app.models import LedgerDirection, LedgerEntry, Payment, PaymentStatus
 from app.repositories.payment_repository import PaymentRepository
+from app.schemas.payment import PaymentListResponse, PaymentRead, PaymentSummary
 
 
 class IdempotencyKeyReusedError(Exception):
@@ -117,3 +121,32 @@ class PaymentService:
 
     def get_payment_for_order(self, order_id: uuid.UUID) -> Payment | None:
         return self.repository.get_by_order_id(order_id)
+
+    def list_payments(
+        self, *, limit: int = 20, status: str | None = None, cursor: str | None = None
+    ) -> PaymentListResponse:
+        """Newest first. Raises CursorError for a malformed cursor."""
+        after = decode_cursor(cursor) if cursor else None
+        rows = self.repository.list_payments(limit=limit, status=status, after=after)
+        next_cursor = None
+        if len(rows) > limit:
+            rows = rows[:limit]
+            next_cursor = encode_cursor(rows[-1].created_at, rows[-1].id)
+        return PaymentListResponse(
+            items=[PaymentRead.from_payment(payment) for payment in rows],
+            next_cursor=next_cursor,
+        )
+
+    def summary(self) -> PaymentSummary:
+        counts = self.repository.count_by_status()
+        totals = self.repository.ledger_totals()
+        captured = totals.get(LedgerDirection.DEBIT.value, Decimal("0"))
+        refunded = totals.get(LedgerDirection.CREDIT.value, Decimal("0"))
+        return PaymentSummary(
+            counts={status.value: counts.get(status.value, 0) for status in PaymentStatus},
+            total=sum(counts.values()),
+            captured_amount=captured,
+            refunded_amount=refunded,
+            net_amount=captured - refunded,
+            generated_at=datetime.now(UTC),
+        )

@@ -37,6 +37,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      # First boot on a new volume can take about two minutes; failures in this
+      # window don't count, and the check still passes as soon as it's ready.
+      start_period: 180s
 
   redis:
     image: redis:7-alpine

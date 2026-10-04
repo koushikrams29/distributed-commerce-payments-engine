@@ -166,7 +166,7 @@ Each Gateway instance consumes every routing key (`#`) on its own private, auto-
 |---|---|---|
 | 1 | client → server | `{"type": "auth", "token": "<access JWT>"}` — must arrive within `DASHBOARD_AUTH_TIMEOUT_SECONDS` (5) |
 | 2 | server → client | `{"type": "ready"}` — client should now load its snapshot (`GET /api/v1/orders`, `/products`) |
-| 3+ | server → client | `{"type": "<routing key>", "data": {...event payload}, "received_at": "<ISO time>"}` |
+| 3+ | server → client | `{"type": "<routing key>", "data": {...event payload}, "received_at": "<ISO time>", "trace_id": "<32 hex chars or null>"}` |
 
 | Close code | Meaning | Client should |
 |---|---|---|
@@ -176,13 +176,30 @@ Each Gateway instance consumes every routing key (`#`) on its own private, auto-
 
 The token is sent in the first frame rather than the URL so it never appears in proxy or access logs. Events are not replayed: the stream is a live view, and the client resynchronises from the REST snapshot after every (re)connect. The dashboard merges snapshot and live updates by lifecycle position (`pending` < `reserved` < `paid` < `fulfilled`/`cancelled`), which is correct regardless of arrival order because statuses only move forward. If RabbitMQ restarts, the consumer reconnects every 5 s. The React client lives in `frontend/` (see §8). Set `CORS_ALLOWED_ORIGINS` only when the dashboard is hosted on a different origin than the Gateway.
 
+`trace_id` is the trace of the consumer span that received the event, which continues the publisher's trace through the message headers. The console links it to Jaeger, so any event in the feed opens the request that caused it.
+
+### Operations (Gateway)
+
+Served by the Gateway itself, not proxied: they combine every service's view, which no single service has. Admin only (`403` otherwise), rate-limited in the `api` bucket.
+
+| Method | Path | Request | Response |
+|---|---|---|---|
+| GET | `/api/v1/ops/health` | — | `{components: [{name, kind, status: up\|degraded\|down, detail, latency_ms}], checked_at}` — the Gateway and its database, every service's `/health/db`, RabbitMQ (management API) and Redis, checked concurrently with a short timeout each |
+| GET | `/api/v1/ops/queues` | — | `{queues: [{name, ready, unacknowledged, consumers, retrying, dead_lettered, publish_rate, deliver_rate}], checked_at}` — each work queue with the sum of its `.retry.*` queues and its `.dlq`; `503` if the management API is unreachable |
+| GET | `/api/v1/ops/dead-letters/{queue}` | query: `limit` (1–100, default 20) | `{queue, total, messages: [{routing_key, payload, order_id, retry_count, last_error, dead_lettered_at, message_id}]}` — oldest first; reading leaves them on the queue; `404` for anything but a work queue |
+| POST | `/api/v1/ops/dead-letters/{queue}/replay` | `{limit: int \| null}` (null replays all) | `{queue, replayed}` — the same operation as the replay CLI; the admin's user ID is logged |
+
+Queue names are validated against a strict pattern and must have a `.dlq` sibling, so the endpoints cannot be pointed at arbitrary queues. Settings: `RABBITMQ_MANAGEMENT_URL` (credentials come from `RABBITMQ_URL`) and `NOTIFICATION_SERVICE_URL` for the health check.
+
 ### Orders (Order Service)
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
 | POST | `/orders` | shopper (JWT) | `{items: [{product_id, qty}], idempotency_key}` | `201` with the created order; `200` with the existing order when the `(user, idempotency_key)` pair was already used |
 | GET | `/orders/{id}` | shopper (own) / admin (any) | — | `{order_id, status, items, total_amount, timestamps}` |
-| GET | `/orders` | admin | query: `status`, `cursor` | cursor-paginated list of orders |
+| GET | `/orders` | admin | query: `status`, `created_from`, `created_to` (ISO instants with an offset), `cursor`, `limit` (1–100) | cursor-paginated list of orders, newest first |
+| GET | `/orders/summary` | admin | — | `{counts: {status: n}, total, outbox: {unpublished, oldest_unpublished_at}, overdue: [{status, count, after_minutes}], reconciler_enabled, reconcile_interval_seconds, generated_at}` — "overdue" uses the reconciler's own timeouts and clocks |
+| GET | `/orders/{id}/events` | admin | — | the outbox rows for one order, oldest first: `[{id, event_type, payload, created_at, published_at, trace_id}]`; `published_at` is null while the relay has not sent it |
 
 `user_id` is taken from the verified JWT `sub` claim — it is not accepted in the request body. Shoppers receive `404` (not `403`) when reading another user's order so that order IDs are not confirmed to exist across accounts.
 
@@ -190,7 +207,8 @@ The token is sent in the first frame rather than the URL so it never appears in 
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
-| GET | `/products` | admin | — | `{items: [{id, name, price, stock_qty}]}` |
+| GET | `/products` | admin | — | `{items: [{id, name, price, stock_qty, reserved_qty, committed_qty}]}` — `stock_qty` is what can still be reserved (held units are already deducted); `reserved_qty` is held, `committed_qty` sold |
+| GET | `/reservations` | admin | query: `order_id`, `status` (`held`, `committed`, `released`), `limit` (1–200) | reservation rows with product names, newest first |
 | GET | `/products/{id}` | authenticated | — | catalogue fields; `active_reservations` only included for admin |
 | POST | `/reservations` | authenticated | `{order_id, items: [{product_id, qty}]}` | `201` with held reservations; `409` if stock insufficient |
 | POST | `/reservations/{order_id}/release` | authenticated | — | restores held stock for that order; no-op once committed |
@@ -203,6 +221,8 @@ With `USE_EVENT_BUS=true`, reserve, commit and release run via RabbitMQ events; 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
 | POST | `/charges` | authenticated | `{order_id, amount, idempotency_key}` | `201` on first charge; `200` when the same charge is replayed; `409` when the key already belongs to a different order or amount |
+| GET | `/payments` | admin | query: `status`, `cursor`, `limit` (1–100) | cursor-paginated charges with their ledger entries, newest first |
+| GET | `/payments/summary` | admin | — | `{counts: {status: n}, total, captured_amount, refunded_amount, net_amount, generated_at}` — money totals come from the ledger, not the payment rows |
 | GET | `/payments/{order_id}` | admin | — | `{payment_id, status, amount, ledger_entries[]}` |
 
 With `USE_EVENT_BUS=true`, Order Service writes `order.created` and `charge.requested` to the outbox (same DB transaction), a relay publishes to RabbitMQ, and Inventory/Payment consumers handle reserve/charge. Set `USE_EVENT_BUS=false` to fall back to HTTP `BackgroundTasks` (used in CI).
@@ -287,7 +307,7 @@ python -m commerce_common.messaging.replay payment.events --dry-run   # how many
 python -m commerce_common.messaging.replay payment.events --limit 10  # replay up to 10
 ```
 
-Replay publishes straight to the named work queue, not the topic exchange, so other services do not receive the event a second time.
+Replay publishes straight to the named work queue, not the topic exchange, so other services do not receive the event a second time. The console's Failures page does the same through `POST /api/v1/ops/dead-letters/{queue}/replay`, after showing the messages (attempts, last error, payload) and asking for confirmation.
 
 ### 📘 Concept — Dead-letter queues and poison messages
 
@@ -391,13 +411,14 @@ distributed-commerce-payments-engine/
 │
 ├── frontend/
 │   ├── src/
-│   │   ├── pages/                      # Dashboard, Orders, Inventory, Metrics
-│   │   ├── components/                 # shared UI pieces (OrderRow, StatusBadge, etc.)
-│   │   ├── api/                        # typed API client per backend domain
-│   │   ├── hooks/                      # useOrders(), useLiveUpdates(), etc.
-│   │   ├── store/                      # Zustand store
+│   │   ├── pages/                      # Overview, Orders, Order detail, Live events, Payments, Inventory, Failures, Services
+│   │   ├── components/                 # saga track, timeline, status badges; ui/ holds panels, states, dialogs, toasts
+│   │   ├── app/                        # shell, session, live-data provider (one socket), useResource, tool links
+│   │   ├── lib/                        # typed API client, router, saga/health/timeline derivations (unit-tested)
+│   │   ├── dashboard/                  # WebSocket hook and the live-state reducer
 │   │   └── App.tsx
-│   ├── nginx/default.conf.template     # serves the build, proxies /api and /ws to the Gateway
+│   ├── public/config.json              # tool links for `npm run dev`; nginx generates it in containers
+│   ├── nginx/default.conf.template     # serves the build and /config.json, proxies /api and /ws to the Gateway
 │   ├── Dockerfile
 │   ├── package.json
 │   └── vite.config.ts
@@ -430,7 +451,7 @@ distributed-commerce-payments-engine/
 
 **Routers are grouped by backend resource/domain (a "bounded context"), never by frontend page.** `order-service/app/api/routers/orders.py` exposes `POST /orders`, `GET /orders/{id}`, etc. — that's the entire feature surface for the Order domain, and it exists independently of how any UI happens to display orders.
 
-The frontend's page structure (`frontend/src/pages/Dashboard.tsx`, `Orders.tsx`, `Inventory.tsx`) is a **completely separate organizing axis** — a single page like `Dashboard.tsx` can call multiple backend routers across multiple services (orders + inventory + metrics) to assemble one screen. Backend structure = resource-oriented (REST). Frontend structure = user-journey-oriented (pages/screens). They're never forced to mirror each other — trying to make them mirror each other is a common beginner mistake, and a sign of a codebase that resembles its UI mockups more than its actual domain model.
+The frontend's page structure (`frontend/src/pages/OverviewPage.tsx`, `OrdersPage.tsx`, `InventoryPage.tsx`) is a **completely separate organizing axis** — a single page like `OrderDetailPage.tsx` calls routers across three services (the order and its outbox events, its reservations, its payment and ledger) to assemble one screen. Backend structure = resource-oriented (REST). Frontend structure = user-journey-oriented (pages/screens). They're never forced to mirror each other — trying to make them mirror each other is a common beginner mistake, and a sign of a codebase that resembles its UI mockups more than its actual domain model.
 
 Within a single service, if it owns more than one resource type, you'd add more router files (e.g., Inventory Service could eventually split into `routers/products.py` and `routers/reservations.py`) — the split is always "what resource does this represent," never "what screen shows this."
 
@@ -462,6 +483,10 @@ Then open http://localhost:8080 and sign in as `admin@example.com` / `admin-pass
 **Dependencies:** each `requirements.in` lists a service's direct dependencies; `requirements.txt` is the fully pinned lock that images, CI and virtualenvs all install. After editing a `.in` file, run `python scripts/lock_requirements.py` (needs `pip install uv`); add `--upgrade` to move every pin to the newest allowed version. CI fails if a lock is out of date.
 
 **Admin dashboard:** `cd frontend && npm install && npm run dev`, then open http://localhost:5173 and sign in as an admin. The Vite dev server proxies `/api` and `/ws` to the Gateway on port 8001 (override with `GATEWAY_URL`), so the browser sees one origin and no CORS setup is needed. `npm test` runs the Vitest suite; `npm run build` type-checks and produces `frontend/dist/`.
+
+**Console tool links:** the console links traces to Jaeger, queues to the RabbitMQ management UI and services to Grafana. It reads those base URLs at runtime from `/config.json`, so one image works everywhere: in containers nginx generates the file from `JAEGER_UI_URL`, `GRAFANA_UI_URL` and `RABBITMQ_UI_URL` (defaults in the Dockerfile point at localhost; the production overlay sets its own and leaves RabbitMQ empty, which hides those links), and `npm run dev` serves `public/config.json`.
+
+**A separate set of credentials:** Compose reads `infra/.env` by default. To run with other values without editing it, keep them in another gitignored file and pass it explicitly, e.g. `docker compose --env-file .env.dev.local -p commerce-local -f docker-compose.yml -f docker-compose.app.yml up -d --build --wait`. A different project name (`-p`) also gives the services their own containers and network. On a slow or memory-constrained machine, building one image at a time (`COMPOSE_BAKE=false docker compose ... build <service>`) avoids BuildKit running out of memory; RabbitMQ's health check allows a 180 s start period for the same reason.
 
 ## 9. Deployment architecture
 

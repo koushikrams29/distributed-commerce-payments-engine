@@ -14,7 +14,13 @@ from commerce_common.messaging.rabbitmq import (
     RETRY_COUNT_HEADER,
     dead_letter_queue_name,
 )
-from commerce_common.messaging.replay import count_dead_letters, replay_dead_letters
+from commerce_common.messaging.replay import (
+    UnknownQueueError,
+    count_dead_letters,
+    main,
+    peek_dead_letters,
+    replay_dead_letters,
+)
 from tests.helpers import Recorder, wait_for_queue, wait_until
 
 pytestmark = pytest.mark.integration
@@ -153,6 +159,68 @@ def test_replay_respects_the_limit(
 
     assert replay_dead_letters(rabbitmq_url, queue, limit=2) == 2
     assert count_dead_letters(rabbitmq_url, queue) == 1
+
+
+def test_peek_shows_dead_letters_without_removing_them(
+    rabbitmq_url: str, names: tuple[str, str], start: Callable[..., Consumer]
+) -> None:
+    queue, routing_key = names
+    handler = Recorder(fail_times=1_000, error=NonRetryableError("unknown product"))
+    consumer = start(queue_name=queue, routing_keys=[routing_key], handler=handler,
+                     retry_delays_seconds=FAST_RETRIES)
+    wait_for_queue(rabbitmq_url, dead_letter_queue_name(queue))
+    for n in range(3):
+        publish_event(rabbitmq_url, routing_key, {"order_id": f"o-{n}"})
+    wait_until(lambda: count_dead_letters(rabbitmq_url, queue) == 3)
+    consumer.stop()
+
+    first_two = peek_dead_letters(rabbitmq_url, queue, limit=2)
+    again = peek_dead_letters(rabbitmq_url, queue, limit=10)
+
+    assert [json.loads(m.body) for m in first_two] == [{"order_id": "o-0"}, {"order_id": "o-1"}]
+    assert [json.loads(m.body)["order_id"] for m in again] == ["o-0", "o-1", "o-2"]
+    assert first_two[0].routing_key == routing_key
+    assert first_two[0].retry_count == 0
+    assert first_two[0].last_error == "NonRetryableError: unknown product"
+    assert first_two[0].dead_lettered_at is not None
+    assert count_dead_letters(rabbitmq_url, queue) == 3
+
+
+def test_peek_of_an_empty_dead_letter_queue_returns_nothing(
+    rabbitmq_url: str, names: tuple[str, str], start: Callable[..., Consumer]
+) -> None:
+    queue, routing_key = names
+    start(queue_name=queue, routing_keys=[routing_key], handler=Recorder())
+    wait_for_queue(rabbitmq_url, dead_letter_queue_name(queue))
+
+    assert peek_dead_letters(rabbitmq_url, queue, limit=5) == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda url, queue: count_dead_letters(url, queue),
+        lambda url, queue: peek_dead_letters(url, queue, limit=1),
+        lambda url, queue: replay_dead_letters(url, queue),
+    ],
+    ids=["count", "peek", "replay"],
+)
+def test_a_queue_that_was_never_declared_is_reported_as_unknown(
+    rabbitmq_url: str, names: tuple[str, str], operation: Callable[[str, str], object]
+) -> None:
+    queue, _ = names
+
+    with pytest.raises(UnknownQueueError):
+        operation(rabbitmq_url, queue)
+
+
+def test_the_cli_reports_an_unknown_queue(
+    rabbitmq_url: str, names: tuple[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    queue, _ = names
+
+    assert main([queue, "--url", rabbitmq_url, "--dry-run"]) == 1
+    assert "has no dead-letter queue" in capsys.readouterr().out
 
 
 def test_fanout_consumers_drop_failures_instead_of_looping(

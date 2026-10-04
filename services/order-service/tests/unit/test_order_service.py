@@ -1,9 +1,11 @@
 import uuid
 from decimal import Decimal
 
+import pytest
+
 from app.models import OrderStatus
 from app.schemas.order import OrderCreate, OrderItemCreate
-from app.services.order_service import OrderService
+from app.services.order_service import OrderService, trace_id_from_context
 
 
 def _payload(*quantities: int) -> OrderCreate:
@@ -47,3 +49,24 @@ def test_idempotency_key_is_carried_onto_the_order() -> None:
 
     assert order.idempotency_key == payload.idempotency_key
     assert order.user_id == user_id
+
+
+@pytest.mark.parametrize(
+    ("trace_context", "expected"),
+    [
+        (
+            {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+        ),
+        # An all-zero trace ID is the W3C "invalid" value.
+        ({"traceparent": "00-00000000000000000000000000000000-00f067aa0ba902b7-01"}, None),
+        ({"traceparent": "not-a-traceparent"}, None),
+        ({"traceparent": 42}, None),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_trace_id_is_read_from_a_valid_traceparent_only(
+    trace_context: dict | None, expected: str | None
+) -> None:
+    assert trace_id_from_context(trace_context) == expected

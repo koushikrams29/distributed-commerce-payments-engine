@@ -37,6 +37,17 @@ describe("describeEvent", () => {
     expect(description.tone).toBe("danger");
   });
 
+  it("treats a rejected reservation as a failure and cancellation as compensation", () => {
+    const rejected = describeEvent(event("inventory.failed", { ...ORDER, reason: "unknown product" }));
+    expect(rejected).toEqual({
+      title: "Order abcdef12 reservation rejected",
+      detail: "unknown product",
+      tone: "danger",
+    });
+    expect(describeEvent(event("order.cancelled", ORDER)).tone).toBe("warning");
+    expect(describeEvent(event("refund.requested", ORDER)).tone).toBe("warning");
+  });
+
   it("falls back to the raw routing key for unknown events", () => {
     expect(describeEvent(event("shipping.label_printed")).title).toBe("shipping.label_printed");
   });

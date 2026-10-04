@@ -18,8 +18,12 @@ class Settings(ObservabilitySettings):
     order_service_url: str = "http://127.0.0.1:8000"
     inventory_service_url: str = "http://127.0.0.1:8002"
     payment_service_url: str = "http://127.0.0.1:8003"
+    # Not proxied (it has no public API); only health-checked by the ops view.
+    notification_service_url: str = "http://127.0.0.1:8004"
     recommendation_service_url: str = "http://127.0.0.1:8005"
     proxy_timeout_seconds: float = 10.0
+    # Health checks must answer fast: a slow dependency counts as down.
+    ops_health_timeout_seconds: float = 2.0
 
     redis_url: str = "redis://localhost:6379/0"
     rate_limit_enabled: bool = True
@@ -31,6 +35,8 @@ class Settings(ObservabilitySettings):
     rate_limit_auth_refill_per_second: float = 1 / 12
 
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    # Queue depths for the ops view; signs in with the RABBITMQ_URL credentials.
+    rabbitmq_management_url: str = "http://localhost:15672"
     dashboard_events_enabled: bool = True
     dashboard_auth_timeout_seconds: float = 5.0
     # JSON list, e.g. ["https://dashboard.example.com"]. Empty = same-origin only.

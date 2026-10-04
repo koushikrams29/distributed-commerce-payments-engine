@@ -1,5 +1,5 @@
-# ${GATEWAY_URL}, ${NGINX_LOCAL_RESOLVERS} and ${TRUSTED_PROXY} are filled in at
-# container start. nginx's own variables ($host, $remote_addr, ...) are left
+# ${GATEWAY_URL}, ${NGINX_LOCAL_RESOLVERS}, ${TRUSTED_PROXY} and the *_UI_URL
+# tool links are filled in at container start. nginx's own variables ($host, $remote_addr, ...) are left
 # alone because no environment variable has those names.
 
 # Re-resolve the gateway's name instead of caching one address forever: a
@@ -50,6 +50,15 @@ server {
         # Dashboard sockets sit idle between events; the default 60s would cut them.
         proxy_read_timeout 1h;
         proxy_send_timeout 1h;
+    }
+
+    # Where the console links to Jaeger, Grafana and RabbitMQ, as the operator's
+    # browser reaches them; an empty URL hides that tool's links. Values are
+    # inserted into JSON as-is, so they must not contain double quotes.
+    location = /config.json {
+        default_type application/json;
+        add_header Cache-Control "no-cache";
+        return 200 '{"jaegerUrl":"${JAEGER_UI_URL}","grafanaUrl":"${GRAFANA_UI_URL}","rabbitmqUrl":"${RABBITMQ_UI_URL}"}';
     }
 
     # Vite fingerprints asset file names, so a changed file always gets a new URL.
