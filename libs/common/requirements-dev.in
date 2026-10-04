@@ -3,6 +3,7 @@
 -e .
 
 pytest
+pytest-cov
 # The observability helpers wrap FastAPI apps; the services provide these at runtime.
 fastapi
 httpx

@@ -1,0 +1,81 @@
+# A public deployment on one server, layered on top of the other two files:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.app.yml -f docker-compose.prod.yml up -d --build
+#
+# Caddy is the only thing reachable from the internet: it gets an HTTPS
+# certificate for SITE_ADDRESS and forwards to the dashboard's nginx. Postgres,
+# RabbitMQ, Redis and Prometheus get no host ports at all; Grafana and Jaeger
+# listen on the server's loopback interface, for an SSH tunnel.
+# Walkthrough: docs/DEPLOYMENT.md. Needs Docker Compose 2.24.4+ for !reset/!override.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?Set SITE_ADDRESS in infra/.env (see .env.production.example)}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates live here; losing them means re-issuing and hitting rate limits.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      edge:
+        ipv4_address: 10.250.250.3
+    depends_on:
+      frontend:
+        condition: service_healthy
+
+  frontend:
+    ports: !reset []
+    environment:
+      # Caddy's fixed address: the only sender whose X-Forwarded-For nginx believes.
+      # Not the whole subnet, which includes the bridge gateway (.1) the host uses.
+      TRUSTED_PROXY: 10.250.250.3
+    networks:
+      default:
+      edge:
+        # Fixed as well, so dynamic allocation can never take Caddy's address first.
+        ipv4_address: 10.250.250.2
+
+  gateway:
+    environment:
+      SEED_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:?Set DEMO_ADMIN_PASSWORD in infra/.env}
+      SEED_SHOPPER_PASSWORD: ${DEMO_SHOPPER_PASSWORD:?Set DEMO_SHOPPER_PASSWORD in infra/.env}
+
+  postgres:
+    ports: !reset []
+
+  rabbitmq:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  prometheus:
+    ports: !reset []
+
+  jaeger:
+    ports: !override
+      - "127.0.0.1:16686:16686"
+
+  grafana:
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in infra/.env}
+    ports: !override
+      - "127.0.0.1:3000:3000"
+
+networks:
+  edge:
+    ipam:
+      config:
+        # Outside Docker's default pools and Oracle Cloud's default 10.0.0.0/16 VCN.
+        - subnet: 10.250.250.0/29
+
+volumes:
+  caddy_data:
+  caddy_config:

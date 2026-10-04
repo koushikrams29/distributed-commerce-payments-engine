@@ -16,6 +16,7 @@ FROM nginxinc/nginx-unprivileged:1.30-alpine
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /src/dist /usr/share/nginx/html
 ENV GATEWAY_URL=http://gateway:8001 \
+    TRUSTED_PROXY=127.0.0.1 \
     NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \

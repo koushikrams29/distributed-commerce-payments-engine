@@ -11,6 +11,9 @@ class Settings(ObservabilitySettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
     seed_dev_users: bool = False
+    # Applied only when the account is first created; changing them later has no effect.
+    seed_admin_password: str = "admin-pass-123"
+    seed_shopper_password: str = "shopper-pass-123"
 
     order_service_url: str = "http://127.0.0.1:8000"
     inventory_service_url: str = "http://127.0.0.1:8002"

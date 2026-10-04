@@ -6,11 +6,15 @@
 Places an order as the seeded shopper and waits for the saga to fulfil it,
 while the seeded admin watches the live dashboard socket. Exits non-zero on
 the first failed check.
+
+Against a deployment, pass its URL and the demo passwords from its infra/.env
+(DEMO_ADMIN_PASSWORD, DEMO_SHOPPER_PASSWORD) as environment variables.
 """
 
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 import time
@@ -19,8 +23,8 @@ import uuid
 import httpx
 import websockets
 
-SHOPPER = ("shopper@example.com", "shopper-pass-123")
-ADMIN = ("admin@example.com", "admin-pass-123")
+SHOPPER = ("shopper@example.com", os.environ.get("DEMO_SHOPPER_PASSWORD", "shopper-pass-123"))
+ADMIN = ("admin@example.com", os.environ.get("DEMO_ADMIN_PASSWORD", "admin-pass-123"))
 FINAL_STATUSES = {"fulfilled", "cancelled", "failed"}
 
 

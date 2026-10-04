@@ -70,6 +70,19 @@ def test_login_rejects_bad_password(
     assert response.status_code == 401
 
 
+def test_login_rejects_overlong_password_without_crashing(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    _create_user(session_factory, email="shopper@example.com", password="secret-pass")
+
+    response = client.post(
+        "/auth/login",
+        data={"username": "shopper@example.com", "password": "x" * 200},
+    )
+
+    assert response.status_code == 401
+
+
 def test_login_rejects_unknown_email(client: TestClient) -> None:
     response = client.post(
         "/auth/login",

@@ -25,6 +25,15 @@ from app.repositories.outbox_repository import OutboxRepository
 from app.schemas.order import OrderCreate, OrderListResponse
 
 
+def payment_idempotency_key(order: Order) -> str:
+    """The key Payment deduplicates charges on: one charge per order.
+
+    The shopper's own key is only unique per shopper, but Payment's is global,
+    so reusing it would let shopper B's order replay shopper A's charge.
+    """
+    return f"order-{order.id}"
+
+
 class OrderService:
     def __init__(
         self,
@@ -240,7 +249,7 @@ class OrderService:
                 result = self.payment.charge(
                     order_id=order.id,
                     amount=order.total_amount,
-                    idempotency_key=order.idempotency_key,
+                    idempotency_key=payment_idempotency_key(order),
                     access_token=access_token,
                 )
             except PaymentUnavailableError:
@@ -321,7 +330,7 @@ class OrderService:
                 payload_json={
                     "order_id": str(order.id),
                     "amount": str(order.total_amount),
-                    "idempotency_key": order.idempotency_key,
+                    "idempotency_key": payment_idempotency_key(order),
                     "items": [
                         {"product_id": str(item.product_id), "qty": item.qty}
                         for item in order.items

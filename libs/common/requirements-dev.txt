@@ -23,6 +23,8 @@ charset-normalizer==3.5.2
     # via requests
 colorama==0.4.6 ; sys_platform == 'win32'
     # via pytest
+coverage==7.16.2
+    # via pytest-cov
 docker==7.2.0
     # via testcontainers
 fastapi==0.142.2
@@ -111,7 +113,9 @@ pika==1.4.4
     #   commerce-common
     #   testcontainers
 pluggy==1.6.0
-    # via pytest
+    # via
+    #   pytest
+    #   pytest-cov
 prometheus-client==0.26.0
     # via commerce-common
 protobuf==7.36.2
@@ -132,6 +136,10 @@ pygments==2.21.0
 pyjwt==2.15.1
     # via commerce-common
 pytest==9.1.1
+    # via
+    #   -r requirements-dev.in
+    #   pytest-cov
+pytest-cov==7.1.0
     # via -r requirements-dev.in
 python-dotenv==1.2.4
     # via
@@ -149,6 +157,8 @@ starlette==1.7.0
     #   fastapi
 testcontainers==4.15.0
     # via -r requirements-dev.in
+tomli==2.4.1 ; python_full_version <= '3.11'
+    # via coverage
 typing-extensions==4.16.0
     # via
     #   anyio

@@ -4,73 +4,93 @@
 
 [![CI](https://github.com/koushikrams29/distributed-commerce-payments-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/koushikrams29/distributed-commerce-payments-engine/actions/workflows/ci.yml)
 
-📄 **[Product Requirements (PRD)](./docs/PRD.md)** — what the system does, end-to-end user/failure flows, functional requirements.
-🏗️ **[Architecture & Technical Design](./docs/ARCHITECTURE.md)** — services, data model, event contracts, full repo scaffold.
+📄 **[Product Requirements (PRD)](./docs/PRD.md)** — what the system does, end-to-end user and failure flows, functional requirements.
+🏗️ **[Architecture & Technical Design](./docs/ARCHITECTURE.md)** — services, data model, API and event contracts, operations, and the full decisions log.
+🚀 **[Deployment guide](./docs/DEPLOYMENT.md)** — from a new Oracle Cloud account to a live HTTPS demo.
 
 ## 1. What this is and why it exists
 
-A pure backend, event-driven microservices platform that simulates the core of a real e-commerce + payments system: order lifecycle management, inventory reservation under concurrency, idempotent payment processing, async notifications, and a lightweight recommendation service — all wired together with the reliability patterns (outbox, idempotency keys, distributed locks, rate limiting, distributed tracing) that separate a "CRUD demo" from a system that could survive production traffic.
+An event-driven microservices backend that simulates the core of an e-commerce and payments system: order lifecycle, inventory reservation under concurrency, idempotent payments with a ledger, notifications, and co-purchase recommendations — plus a live admin dashboard that shows the saga as it happens. The services are wired together with the reliability patterns that separate a CRUD demo from a system that could survive production traffic: a transactional outbox, idempotency keys backed by unique constraints, row-level locking, bounded retries with dead-letter queues, rate limiting, and distributed tracing.
 
-This project exists to prove one thing under adversarial interview questioning: **I can design and operate a coherent distributed system, not just five apps that happen to share a database.** Every service reuses the same auth, observability, CI/CD, and testing conventions on purpose — the goal is architectural depth, not surface area.
+This project exists to prove one thing under adversarial interview questioning: **I can design and operate a coherent distributed system, not just six apps that happen to share a database.** Every service follows the same auth, observability, testing and deployment conventions on purpose — the goal is architectural depth, not surface area.
 
-**Status:** 🚧 In progress — Week 1 of build (Phase 1, Weeks 1–8).
+**Status:** Phase 1 feature-complete — six services, the full saga with compensations, observability, container images, and a CI pipeline that ends with an end-to-end test of the running stack.
 
 ## 2. Architecture
 
 ```mermaid
 graph TD
-    Client[React Admin Dashboard] -->|HTTPS| Gateway[FastAPI Gateway / Auth]
+    Browser[Admin dashboard<br/>React, served by nginx] -->|/api and /ws| Gateway[Gateway<br/>JWT auth, rate limiting, routing, WebSocket hub]
+    Gateway -->|token bucket| Redis[(Redis)]
     Gateway --> OrderSvc[Order Service]
     Gateway --> InventorySvc[Inventory Service]
-    OrderSvc -->|publish| Outbox[(Outbox Table)]
-    Outbox -->|relay| Broker[[RabbitMQ]]
-    Broker --> PaymentSvc[Payment Service]
-    Broker --> NotificationSvc[Notification Service]
-    Broker --> RecoSvc[Recommendation Service]
-    PaymentSvc -->|SELECT FOR UPDATE + Redlock| Ledger[(Ledger / Postgres)]
-    InventorySvc -->|row-level locking| InvDB[(Inventory / Postgres)]
-    OrderSvc --> OrderDB[(Orders / Postgres)]
-    Gateway -. traces .-> OTel[OpenTelemetry Collector]
-    OTel --> Grafana[Prometheus + Grafana]
+    Gateway --> PaymentSvc[Payment Service]
+    Gateway --> RecoSvc[Recommendation Service]
+    OrderSvc -->|order + outbox row, one transaction| OrderDB[(orders DB)]
+    OrderDB -->|outbox relay| MQ[[RabbitMQ<br/>topic exchange]]
+    MQ <-->|reserve / commit / release| InventorySvc
+    MQ <-->|charge / refund| PaymentSvc
+    MQ -->|saga replies| OrderSvc
+    MQ -->|order.fulfilled| NotificationSvc[Notification Service]
+    MQ -->|payment.succeeded| RecoSvc
+    MQ -->|every event| Gateway
+    InventorySvc -->|SELECT ... FOR UPDATE| InvDB[(inventory DB)]
+    PaymentSvc -->|unique idempotency key + ledger| PayDB[(payments DB)]
+    OrderSvc -. OTLP traces .-> Jaeger[Jaeger]
+    Prometheus[Prometheus] -. scrapes /metrics .-> OrderSvc
+    Grafana[Grafana] --> Prometheus
+    Grafana --> Jaeger
 ```
 
-Full architecture, data model, and scaffold: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). Full end-to-end flow (happy path + failure/compensation paths): [`docs/PRD.md`](./docs/PRD.md).
+Each service owns its own Postgres database (one Postgres server locally), so no service can join or foreign-key into another's tables — cross-service consistency comes from the saga, not from shared transactions. Every service exports traces and metrics; the diagram shows one of each to stay readable.
 
-## 3. Key engineering decisions & trade-offs
+## 3. How an order flows
 
-_This section is the living log of "why," not just "what." Full log with reasoning in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md#13-key-decisions-log) — summarized here._
+1. The shopper posts an order with an idempotency key. Order Service stores it as `pending` and writes `order.created` to its outbox **in the same transaction**, then answers immediately.
+2. The outbox relay publishes the event. Inventory locks the product rows, reserves stock and replies `inventory.reserved` (or `inventory.failed`, which cancels the order).
+3. Order Service asks Payment to charge. Payment charges at most once per order — the guarantee is a unique constraint, not a lookup — and replies `payment.succeeded` or `payment.failed`.
+4. On success the order becomes `paid`, Inventory commits the reservation, and the order becomes `fulfilled`; Notification records a confirmation and Recommendation updates its co-purchase counts.
+5. On failure the order is cancelled and the reservation released. If a charge lands *after* an order was cancelled, the money is refunded rather than the order resurrected.
+
+A reconciler moves orders stuck in any step toward a terminal state, and every handler is idempotent, so redelivered or out-of-order events are harmless. The admin dashboard receives every event over a WebSocket and shows each order's progress live.
+
+## 4. Key engineering decisions & trade-offs
+
+_Summarised here; the full log with reasoning (60+ entries) is in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md#13-key-decisions-log)._
 
 | Decision | Why | Trade-off accepted |
 |---|---|---|
-| RabbitMQ over Kafka | Lower operational complexity for a first solo distributed system; still demonstrates outbox/retry/DLQ fully | Less "impressive" than Kafka for partition/consumer-group interview questions — documented as a possible v2 migration |
-| `SELECT FOR UPDATE` + Redis Redlock for payment idempotency | Prevent double-spend under concurrent requests | Added write contention under high load |
-| Token Bucket in Redis for rate limiting | Simple, well-understood, fast | Not as fair as sliding-window under bursty traffic |
-| Saga via orchestration, not choreography | Easier to reason about/debug when implementing the pattern for the first time | Order Service becomes a more central/coupled coordinator |
+| RabbitMQ over Kafka | Lower operational complexity for a first distributed system; still demonstrates outbox, retries and dead letters fully | No partitioned replay; documented as a possible v2 migration |
+| Saga via orchestration, not choreography | One service owns the order's state machine, so the flow is readable and debuggable in one place | Order Service is a central coordinator |
+| Transactional outbox, not "write then publish" | An event is published if and only if the write committed — no ghost orders, no lost events | Events are delayed by the relay's polling interval |
+| Idempotency enforced by unique constraints | A check-then-insert races; only the database constraint is a real guarantee under concurrent retries | Callers must send a key; replays need an extra lookup |
+| No distributed lock (Redlock) around charges | The unique key already serialises concurrent charges inside the payment transaction; a Redis lock would add a dependency to the money path without strengthening that | None in practice — this is simpler and stronger |
+| Bounded retries (2 s / 10 s / 30 s) then a dead-letter queue | A poison message can never block a queue; transient failures still recover on their own | Dead letters need an operator, with a replay tool provided |
+| Token bucket rate limiting as a Redis Lua script, failing open | Atomic and fast; a Redis outage briefly loses throttling instead of taking checkout offline | Throttling is best-effort during a Redis outage |
+| Traces straight to Jaeger over OTLP, no collector | One fewer container; adding a collector later is one environment variable | No tail sampling for now |
 
-## 4. Services
+## 5. Services
 
-- **Order Service** — order lifecycle, saga orchestration across services
-- **Inventory Service** — stock reservation with row-level locking to prevent overselling
-- **Payment Service** (mocked gateway) — idempotent payment processing, double-spend prevention, ledger-style transaction log
-- **Notification Service** — async email/notification dispatch via queue consumers
-- **Recommendation Service** — lightweight collaborative-filtering / rules-based recommender
-- **Admin Dashboard** (React) — order monitoring, inventory management, live metrics
+- **Gateway** — login with rotating refresh tokens, JWT verification at the edge, per-user and per-IP rate limits, routing to the services, and the WebSocket hub that streams every event to the dashboard.
+- **Order Service** — the order state machine and saga orchestrator, with the outbox relay and the stuck-order reconciler.
+- **Inventory Service** — stock reservation with row-level locks so concurrent orders cannot oversell; commit and release are idempotent.
+- **Payment Service** (mocked gateway) — at most one charge per order, refunds, and an append-only debit/credit ledger.
+- **Notification Service** — consumes `order.fulfilled` and records a (fake) confirmation email, once per order.
+- **Recommendation Service** — counts how often products are bought together from paid orders and serves "frequently bought with" lists.
+- **Admin dashboard** (React + TypeScript) — live event feed, order table, stock levels and headline metrics, merged correctly whatever order events arrive in.
 
-## 5. Cross-cutting engineering
+## 6. Reliability and operations
 
-- Outbox pattern (Postgres → RabbitMQ/Kafka)
-- Idempotency keys on all mutating endpoints
-- Token Bucket rate limiting in Redis
-- OpenTelemetry trace correlation (HTTP → workers → SQL)
-- Prometheus + Grafana dashboards
-- Full test suite (unit + integration + testcontainers), CI-gated merges
-- Docker Compose for local dev; deployed to Render/Railway + Vercel
+- **Tracing:** one trace follows an order from the HTTP request through the outbox, RabbitMQ and every consumer down to the SQL statements; log lines carry the trace ID.
+- **Metrics:** Prometheus scrapes every service; the provisioned Grafana dashboard covers HTTP latency and errors, order transitions, payment success rate, stock reservations, message outcomes, dead letters, outbox lag and rate-limit decisions.
+- **Failure handling:** delayed retries, dead-letter queues with a replay command, a reconciler for stuck orders, and refunds for late charges.
+- **Security:** bcrypt passwords, short-lived access tokens, hashed rotating refresh tokens, and every service verifying the JWT itself (defense in depth); only the dashboard's nginx is exposed.
 
-## 6. Tech stack
+## 7. Tech stack
 
-Python, FastAPI, PostgreSQL, Redis, RabbitMQ/Kafka, React + TypeScript, Docker, GitHub Actions, OpenTelemetry, Prometheus/Grafana.
+Python 3.11, FastAPI, SQLAlchemy 2, Alembic, PostgreSQL 16, RabbitMQ, Redis, React + TypeScript (Vite), nginx, OpenTelemetry, Jaeger, Prometheus, Grafana, Docker Compose, GitHub Actions, pytest + testcontainers, uv-compiled dependency locks.
 
-## 7. Getting started
+## 8. Getting started
 
 Needs Docker. From the repository root:
 
@@ -82,11 +102,16 @@ docker compose -f docker-compose.yml -f docker-compose.app.yml up --build
 
 Open http://localhost:8080 and sign in as `admin@example.com` / `admin-pass-123`. Traces are at http://localhost:16686 (Jaeger) and metrics at http://localhost:3000 (Grafana). Running services on the host for development is described in [ARCHITECTURE §8](./docs/ARCHITECTURE.md#8-local-dev-environment).
 
-## 8. Test coverage / CI
+To put it on the internet over HTTPS on a free Oracle Cloud server, follow [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md): three scripts take a fresh Ubuntu machine to a running deployment.
 
-[![CI](https://img.shields.io/badge/CI-not_yet_configured-lightgrey)]()
-[![Coverage](https://img.shields.io/badge/coverage-not_yet_configured-lightgrey)]()
+## 9. Testing and CI
 
-## 9. Demo
+Every pull request runs, in GitHub Actions:
 
-_Screenshots / demo GIF / walkthrough video will be added once the system is live._
+- **Unit and integration tests** for each service and the shared library. Integration tests start throwaway Postgres, Redis and RabbitMQ containers and apply the real migrations, so they prove the requirements against real infrastructure — for example, that concurrent reservations never oversell and that a redelivered charge never charges twice.
+- **A branch-coverage gate** of 85% per project; each run's coverage tables appear on its summary page. Every project is currently between 88% and 95%.
+- **A dependency-lock check**, so the images, CI and laptops always install identical versions.
+- **An end-to-end test** that builds every image, starts the whole stack and places an order through the dashboard's proxy while watching the live event stream.
+- **The dashboard's tests and type-checked build.**
+
+The testing strategy and its rules are described in [ARCHITECTURE §11](./docs/ARCHITECTURE.md#11-testing-strategy).

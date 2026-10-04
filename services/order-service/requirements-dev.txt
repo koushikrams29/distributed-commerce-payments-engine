@@ -42,6 +42,8 @@ click==8.5.0
     #   uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
     # via pytest
+coverage==7.16.2
+    # via pytest-cov
 docker==7.2.0
     # via testcontainers
 fastapi==0.142.2
@@ -180,7 +182,9 @@ pika==1.4.4
     #   -c requirements.txt
     #   commerce-common
 pluggy==1.6.0
-    # via pytest
+    # via
+    #   pytest
+    #   pytest-cov
 prometheus-client==0.26.0
     # via
     #   -c requirements.txt
@@ -219,7 +223,10 @@ pytest==9.1.1
     # via
     #   -r requirements-dev.in
     #   pytest-asyncio
+    #   pytest-cov
 pytest-asyncio==1.4.0
+    # via -r requirements-dev.in
+pytest-cov==7.1.0
     # via -r requirements-dev.in
 python-dotenv==1.2.4
     # via
@@ -248,6 +255,8 @@ starlette==1.7.0
     #   fastapi
 testcontainers==4.15.0
     # via -r requirements-dev.in
+tomli==2.4.1 ; python_full_version <= '3.11'
+    # via coverage
 typing-extensions==4.16.0
     # via
     #   -c requirements.txt

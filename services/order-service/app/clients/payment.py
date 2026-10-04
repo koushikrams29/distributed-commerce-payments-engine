@@ -1,8 +1,7 @@
 """HTTP client for the Payment Service.
 
-Until RabbitMQ exists, Order Service talks to Payment over HTTP for charges.
-The JWT is forwarded so Payment can authorize the call the same way a future
-gateway-proxied request would.
+Used only when the event bus is off (USE_EVENT_BUS=false); otherwise charges
+travel as events. The caller's JWT is forwarded so Payment authorizes the call itself.
 """
 
 from __future__ import annotations

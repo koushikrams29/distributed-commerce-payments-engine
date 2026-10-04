@@ -1,0 +1,17 @@
+# SITE_ADDRESS is a domain name pointing at this server (e.g. my-shop.duckdns.org).
+# Caddy obtains and renews its certificate and redirects HTTP to HTTPS.
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# WebSocket upgrades on /ws/ pass through unchanged. Caddy replaces any
+	# X-Forwarded-For sent by the client with the real client address.
+	reverse_proxy frontend:8080
+}
