@@ -114,16 +114,22 @@ sequenceDiagram
         MQ->>OS: inventory.reserved → status = reserved
         OS->>MQ: charge.requested
         MQ->>PS: charge.requested
-        PS->>PS: idempotency check, Redlock, mock charge
+        PS->>PS: idempotency check (unique key), mock charge, ledger entry
 
         alt payment success
             PS->>MQ: payment.succeeded
-            MQ->>OS: status = paid → fulfilled
-            MQ->>NS: payment.succeeded → send confirmation
             MQ->>RS: payment.succeeded → update co-purchase stats
+            MQ->>OS: payment.succeeded → status = paid
+            OS->>MQ: order.paid
+            MQ->>IS: order.paid → commit reservation
+            IS->>MQ: inventory.committed
+            MQ->>OS: inventory.committed → status = fulfilled
+            OS->>MQ: order.fulfilled
+            MQ->>NS: order.fulfilled → send confirmation
         else payment declined
             PS->>MQ: payment.failed
-            MQ->>OS: status = cancelled
+            MQ->>OS: payment.failed → status = cancelled
+            OS->>MQ: order.cancelled
             MQ->>IS: order.cancelled → release reservation
         end
     else stock unavailable

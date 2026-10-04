@@ -9,7 +9,7 @@ from commerce_common.messaging import publish_event, run_consumer
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.models import PaymentStatus
-from app.services.payment_service import PaymentService
+from app.services.payment_service import IdempotencyKeyReusedError, PaymentService
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +21,21 @@ def _handle_charge_requested(_routing_key: str, payload: dict[str, Any]) -> None
 
     db = SessionLocal()
     try:
-        payment, _ = PaymentService(db).charge(
-            order_id=order_id,
-            amount=amount,
-            idempotency_key=idempotency_key,
-        )
+        try:
+            payment, _ = PaymentService(db).charge(
+                order_id=order_id,
+                amount=amount,
+                idempotency_key=idempotency_key,
+            )
+        except IdempotencyKeyReusedError as exc:
+            logger.warning("refused charge for order %s: %s", order_id, exc)
+            # Fail the order now instead of leaving it for the reconciler's timeout.
+            publish_event(
+                settings.rabbitmq_url,
+                EventType.PAYMENT_FAILED,
+                {"order_id": str(order_id), "amount": str(amount), "reason": str(exc)},
+            )
+            return
         if payment.status == PaymentStatus.SUCCEEDED.value:
             event_payload = {
                 "order_id": str(order_id),

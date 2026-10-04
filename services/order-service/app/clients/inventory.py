@@ -1,8 +1,8 @@
 """HTTP client for the Inventory Service.
 
-Until RabbitMQ exists, Order Service talks to Inventory over HTTP for catalogue
-prices and stock reservation. The JWT is forwarded so Inventory can authorize
-the call the same way a future gateway-proxied request would.
+Catalogue prices are always read over HTTP. Reservations go over HTTP only
+when the event bus is off (USE_EVENT_BUS=false); otherwise they travel as
+events. The caller's JWT is forwarded so Inventory authorizes the call itself.
 """
 
 from __future__ import annotations

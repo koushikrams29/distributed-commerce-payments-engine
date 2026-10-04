@@ -27,12 +27,12 @@ def _seed_dev_users() -> None:
         service = AuthService(db)
         service.ensure_user(
             email="shopper@example.com",
-            password="shopper-pass-123",
+            password=settings.seed_shopper_password,
             role=Role.SHOPPER,
         )
         service.ensure_user(
             email="admin@example.com",
-            password="admin-pass-123",
+            password=settings.seed_admin_password,
             role=Role.ADMIN,
         )
     finally:

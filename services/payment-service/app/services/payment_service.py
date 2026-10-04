@@ -15,6 +15,10 @@ from app.models import LedgerDirection, LedgerEntry, Payment, PaymentStatus
 from app.repositories.payment_repository import PaymentRepository
 
 
+class IdempotencyKeyReusedError(Exception):
+    """The key already belongs to a charge for a different order or amount."""
+
+
 class PaymentService:
     def __init__(
         self,
@@ -35,12 +39,12 @@ class PaymentService:
         """Attempt a charge once per idempotency key (FR-3).
 
         Returns (payment, created). Replays return the stored payment with
-        created=False.
+        created=False; a key reused for a different charge raises
+        IdempotencyKeyReusedError rather than reporting someone else's payment.
         """
         existing = self.repository.get_by_idempotency_key(idempotency_key)
         if existing is not None:
-            PAYMENT_REPLAYS.inc()
-            return existing, False
+            return self._replay(existing, order_id=order_id, amount=amount), False
 
         payment = Payment(
             order_id=order_id,
@@ -57,8 +61,7 @@ class PaymentService:
             existing = self.repository.get_by_idempotency_key(idempotency_key)
             if existing is None:
                 raise
-            PAYMENT_REPLAYS.inc()
-            return existing, False
+            return self._replay(existing, order_id=order_id, amount=amount), False
 
         if self.gateway.charge(amount):
             payment.status = PaymentStatus.SUCCEEDED.value
@@ -78,6 +81,15 @@ class PaymentService:
             PAYMENT_CAPTURED_AMOUNT.inc(float(amount))
         self.db.refresh(payment)
         return payment, True
+
+    @staticmethod
+    def _replay(existing: Payment, *, order_id: uuid.UUID, amount: Decimal) -> Payment:
+        if existing.order_id != order_id or existing.amount != amount:
+            raise IdempotencyKeyReusedError(
+                "idempotency key already used for a different charge"
+            )
+        PAYMENT_REPLAYS.inc()
+        return existing
 
     def refund_for_order(self, order_id: uuid.UUID) -> list[Payment]:
         """Refund every successful charge for an order; returns the ones refunded now.

@@ -7,7 +7,7 @@
 # Needs JWT_SECRET in infra/.env (see .env.example).
 
 x-app-environment: &app-environment
-  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
   OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
   LOG_FORMAT: json
   LOG_LEVEL: INFO

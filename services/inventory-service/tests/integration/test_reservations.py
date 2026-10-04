@@ -1,6 +1,7 @@
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
@@ -140,17 +141,42 @@ def test_shopper_cannot_list_products(client: TestClient) -> None:
     assert response.status_code == 403
 
 
-def test_shopper_can_read_a_product_for_checkout(
+def test_shopper_can_read_a_product_but_not_other_customers_holds(
     client: TestClient, session_factory: sessionmaker[Session]
 ) -> None:
     product = seed_product(session_factory, name="Checkout Item", stock_qty=4)
-
-    response = client.get(
-        f"/products/{product.id}", headers=auth_header(role=Role.SHOPPER)
+    order_id = uuid.uuid4()
+    client.post(
+        "/reservations",
+        json=reserve_payload(product_id=product.id, qty=1, order_id=order_id),
+        headers=auth_header(),
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["id"] == str(product.id)
-    assert body["stock_qty"] == 4
-    assert body["active_reservations"] == []
+    shopper = client.get(f"/products/{product.id}", headers=auth_header(role=Role.SHOPPER))
+    admin = client.get(f"/products/{product.id}", headers=auth_header(role=Role.ADMIN))
+
+    assert shopper.status_code == 200
+    assert shopper.json()["id"] == str(product.id)
+    assert shopper.json()["stock_qty"] == 3
+    assert shopper.json()["active_reservations"] == []
+    assert [r["order_id"] for r in admin.json()["active_reservations"]] == [str(order_id)]
+
+
+def test_unknown_product_is_not_found(client: TestClient) -> None:
+    response = client.get(f"/products/{uuid.uuid4()}", headers=auth_header(role=Role.SHOPPER))
+
+    assert response.status_code == 404
+
+
+def test_ensure_product_seeds_once_by_name(session_factory: sessionmaker[Session]) -> None:
+    with session_factory() as db:
+        first = InventoryService(db).ensure_product(
+            name="Seeded Mouse", price=Decimal("25.00"), stock_qty=10
+        )
+    with session_factory() as db:
+        again = InventoryService(db).ensure_product(
+            name="Seeded Mouse", price=Decimal("99.00"), stock_qty=1
+        )
+
+    assert again.id == first.id
+    assert (again.price, again.stock_qty) == (Decimal("25.00"), 10)

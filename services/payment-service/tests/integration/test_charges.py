@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
 
 from commerce_common.auth import Role
+
+from app.core import config
 from tests.helpers import auth_header
 
 
@@ -95,13 +97,23 @@ def test_shopper_cannot_read_payment(client: TestClient) -> None:
     assert response.status_code == 403
 
 
+def test_reusing_a_key_for_a_different_charge_is_refused(client: TestClient) -> None:
+    first = {"order_id": str(uuid.uuid4()), "amount": "50.00", "idempotency_key": "shared-key"}
+    client.post("/charges", json=first, headers=auth_header())
+
+    other_order = client.post(
+        "/charges", json=dict(first, order_id=str(uuid.uuid4())), headers=auth_header()
+    )
+    other_amount = client.post("/charges", json=dict(first, amount="75.00"), headers=auth_header())
+
+    assert other_order.status_code == 409
+    assert other_amount.status_code == 409
+
+
 def test_charge_fails_when_mock_gateway_declines(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("MOCK_PAYMENT_OUTCOME", "failure")
-    from app.core import config as config_module
-
-    config_module.settings = config_module.Settings()
+    monkeypatch.setattr(config.settings, "mock_payment_outcome", "failure")
 
     response = client.post(
         "/charges",

@@ -28,17 +28,6 @@ class PaymentRepository:
         )
         return self.db.execute(stmt).scalar_one_or_none()
 
-    def get_by_idempotency_key_for_update(
-        self, idempotency_key: str
-    ) -> Payment | None:
-        stmt = (
-            select(Payment)
-            .where(Payment.idempotency_key == idempotency_key)
-            .with_for_update()
-            .options(selectinload(Payment.ledger_entries))
-        )
-        return self.db.execute(stmt).scalar_one_or_none()
-
     def list_for_order_for_update(self, order_id: uuid.UUID) -> list[Payment]:
         stmt = (
             select(Payment)

@@ -91,6 +91,22 @@ def _outbox(
         ]
 
 
+def test_reservation_marks_reserved_and_requests_the_charge(
+    session_factory: sessionmaker[Session], engine: Engine
+) -> None:
+    order_id = _create_order(session_factory, engine, status=OrderStatus.PENDING)
+
+    _handle(session_factory, "on_inventory_reserved", order_id)
+
+    assert _status(session_factory, order_id) == OrderStatus.RESERVED.value
+    [(event_type, payload)] = _outbox(engine, order_id)
+    assert event_type == EventType.CHARGE_REQUESTED
+    assert payload["order_id"] == str(order_id)
+    assert payload["amount"] == "100.00"
+    # Shoppers pick their own keys, so two shoppers' charges must never share one.
+    assert payload["idempotency_key"] == f"order-{order_id}"
+
+
 def test_payment_success_marks_paid_and_asks_inventory_to_commit(
     session_factory: sessionmaker[Session], engine: Engine
 ) -> None:
@@ -180,6 +196,75 @@ def test_reservation_after_cancellation_releases_the_stock(
 
     assert _status(session_factory, order_id) == OrderStatus.CANCELLED.value
     assert [e for e, _ in _outbox(engine, order_id)] == [EventType.ORDER_CANCELLED]
+
+
+def test_failed_reservation_cancels_without_compensation(
+    session_factory: sessionmaker[Session], engine: Engine
+) -> None:
+    order_id = _create_order(session_factory, engine, status=OrderStatus.PENDING)
+
+    _handle(session_factory, "on_inventory_failed", order_id)
+
+    assert _status(session_factory, order_id) == OrderStatus.CANCELLED.value
+    # Nothing was reserved or charged, so there is nothing to undo.
+    assert _outbox(engine, order_id) == []
+
+
+def test_failed_payment_cancels_and_releases_the_stock(
+    session_factory: sessionmaker[Session], engine: Engine
+) -> None:
+    order_id = _create_order(session_factory, engine, status=OrderStatus.RESERVED)
+
+    _handle(session_factory, "on_payment_failed", order_id)
+
+    assert _status(session_factory, order_id) == OrderStatus.CANCELLED.value
+    [(event_type, payload)] = _outbox(engine, order_id)
+    assert event_type == EventType.ORDER_CANCELLED
+    assert payload["order_id"] == str(order_id)
+
+
+@pytest.mark.parametrize(
+    ("status", "handler"),
+    [
+        (OrderStatus.RESERVED, "on_inventory_reserved"),
+        (OrderStatus.RESERVED, "on_inventory_failed"),
+        (OrderStatus.PAID, "on_payment_succeeded"),
+        (OrderStatus.PENDING, "on_payment_failed"),
+        (OrderStatus.RESERVED, "on_inventory_committed"),
+    ],
+)
+def test_stale_or_duplicate_events_leave_the_order_alone(
+    session_factory: sessionmaker[Session],
+    engine: Engine,
+    status: OrderStatus,
+    handler: str,
+) -> None:
+    order_id = _create_order(session_factory, engine, status=status)
+
+    _handle(session_factory, handler, order_id)
+
+    assert _status(session_factory, order_id) == status.value
+    assert _outbox(engine, order_id, include_status_changes=True) == []
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        "on_inventory_reserved",
+        "on_inventory_failed",
+        "on_payment_succeeded",
+        "on_payment_failed",
+        "on_inventory_committed",
+    ],
+)
+def test_events_for_unknown_orders_are_ignored(
+    session_factory: sessionmaker[Session], engine: Engine, handler: str
+) -> None:
+    order_id = uuid.uuid4()
+
+    _handle(session_factory, handler, order_id)
+
+    assert _outbox(engine, order_id, include_status_changes=True) == []
 
 
 def test_reconciler_resends_order_paid_for_stuck_paid_orders(

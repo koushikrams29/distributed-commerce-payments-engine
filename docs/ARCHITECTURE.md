@@ -18,13 +18,12 @@ graph TD
     MQ -->|order.created| InventorySvc
     MQ -->|inventory.reserved / .failed| OrderSvc
     MQ -->|charge.requested| PaymentSvc[Payment Service]
-    PaymentSvc -->|SELECT FOR UPDATE + idempotency key| Ledger[(Ledger DB - Postgres)]
-    PaymentSvc -->|Redlock during charge| Redis[(Redis)]
+    PaymentSvc -->|unique idempotency key + ledger| Ledger[(Ledger DB - Postgres)]
     MQ -->|payment.succeeded / .failed| OrderSvc
     MQ -->|payment.succeeded| NotificationSvc[Notification Service]
     MQ -->|payment.succeeded| RecoSvc[Recommendation Service]
     InventorySvc -->|row-level lock| InvDB[(Inventory DB - Postgres)]
-    Gateway -->|token bucket check| Redis
+    Gateway -->|token bucket check| Redis[(Redis)]
     OrderSvc -. OTLP spans .-> Jaeger[Jaeger]
     InventorySvc -. OTLP spans .-> Jaeger
     PaymentSvc -. OTLP spans .-> Jaeger
@@ -46,7 +45,7 @@ Order, Inventory, and Payment have genuinely different consistency requirements:
 | Gateway | AuthN/AuthZ (JWT+OAuth2), rate limiting, request routing, WebSocket hub for the dashboard | `users`, `refresh_tokens` | Yes — sole public entry point |
 | Order Service | Order lifecycle state machine, saga orchestration | `orders`, `order_items`, `outbox` | Via Gateway only |
 | Inventory Service | Stock levels, reservation, release-on-failure | `products`, `stock_reservations` | Via Gateway only |
-| Payment Service | Idempotent mocked charge processing, ledger | `payments`, `ledger_entries`, `idempotency_keys` | Via Gateway only |
+| Payment Service | Idempotent mocked charge processing, ledger | `payments`, `ledger_entries` | Via Gateway only |
 | Notification Service | Consumes events, logs (fake) email/SMS | `notifications` | No (consumer-only) |
 | Recommendation Service | Rules-based co-purchase tracking off completed orders | `co_purchase_counts` | Via Gateway only (read endpoint) |
 
@@ -203,7 +202,7 @@ With `USE_EVENT_BUS=true`, reserve, commit and release run via RabbitMQ events; 
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
-| POST | `/charges` | authenticated | `{order_id, amount, idempotency_key}` | `201` on first charge; `200` when the idempotency key was already used |
+| POST | `/charges` | authenticated | `{order_id, amount, idempotency_key}` | `201` on first charge; `200` when the same charge is replayed; `409` when the key already belongs to a different order or amount |
 | GET | `/payments/{order_id}` | admin | — | `{payment_id, status, amount, ledger_entries[]}` |
 
 With `USE_EVENT_BUS=true`, Order Service writes `order.created` and `charge.requested` to the outbox (same DB transaction), a relay publishes to RabbitMQ, and Inventory/Payment consumers handle reserve/charge. Set `USE_EVENT_BUS=false` to fall back to HTTP `BackgroundTasks` (used in CI).
@@ -250,8 +249,8 @@ Consumes `payment.succeeded` (with `items[]` in the payload) and increments pair
 |---|---|---|---|
 | `order.created` | Order Service | Inventory Service | `order_id, items[]` |
 | `inventory.reserved` / `inventory.failed` | Inventory Service | Order Service | `order_id, reservation_id` |
-| `charge.requested` | Order Service | Payment Service | `order_id, amount, idempotency_key` |
-| `payment.succeeded` / `payment.failed` | Payment Service | Order, Recommendation | `order_id, payment_id, amount, items[]` (items on success only) |
+| `charge.requested` | Order Service | Payment Service | `order_id, amount, idempotency_key` (always `order-<order_id>`), `items[]` |
+| `payment.succeeded` / `payment.failed` | Payment Service | Order, Recommendation | `order_id, payment_id, amount, items[]` (items on success only); a refused charge has `reason` and no `payment_id` |
 | `order.cancelled` | Order Service | Inventory Service | `order_id` (triggers release) |
 | `order.paid` | Order Service | Inventory Service | `order_id` (triggers commit) |
 | `inventory.committed` | Inventory Service | Order Service | `order_id, committed_count` |
@@ -306,13 +305,11 @@ If Order Service writes to Postgres and separately calls RabbitMQ, a crash betwe
 
 A retried "charge $50" request must not charge twice. The server stores "I've already handled key X, here's the result," and returns that cached result on retry instead of re-executing the charge.
 
+Two details make that safe. First, the guarantee comes from a **unique constraint**, not from looking the key up: two concurrent deliveries can both miss the lookup, but only one insert can succeed — the other waits for it, gets an integrity error, and returns the winner's payment. Second, a key is only meaningful within its **scope**. Shoppers choose their own order keys, so two shoppers can pick the same one; Order Service therefore never forwards that key to Payment and sends `order-<order_id>` instead, and Payment refuses a known key that arrives with a different order or amount rather than answering with someone else's charge.
+
 ### 📘 Concept — Row-level locking (`SELECT ... FOR UPDATE`)
 
 Two concurrent requests both reading `stock_qty = 1` before either writes is a classic race → overselling. `SELECT ... FOR UPDATE` locks the row for the transaction's duration, turning the race into a queue of one.
-
-### 📘 Concept — Redis Redlock
-
-Row-level locking works within one Postgres instance; a lock that needs to span processes/services needs a **distributed lock**. Redlock acquires a mutually-exclusive lock across Redis with a TTL, so a crashed lock-holder self-expires instead of deadlocking everyone else.
 
 ### 📘 Concept — Token Bucket rate limiting
 
@@ -468,14 +465,30 @@ Then open http://localhost:8080 and sign in as `admin@example.com` / `admin-pass
 
 ## 9. Deployment architecture
 
-- Each service is its own Docker image, deployed as an independent Render/Railway service. Notification and Recommendation are consumer-only (no public traffic needed beyond a `/health` check).
-- Images listen on `$PORT` (defaulting to the service's local port), because hosting platforms assign the port. They run as a non-root user, carry a `HEALTHCHECK` on `/health`, and install only the pinned runtime lock.
-- Migrations run once per release, before the new version starts: as the one-off `<service>-migrate` job in Compose, and as the platform's pre-deploy command (`alembic upgrade head`, same image) in production. Never at service startup, where several replicas would race to migrate.
-- Inter-service URLs are **environment-variable-driven** (e.g., `ORDER_SERVICE_URL`), never hardcoded — this is what lets the exact same code run against Docker Compose service names locally and against real public/internal URLs in production.
-- Postgres/Redis/RabbitMQ: containers locally (via Compose), managed free-tier instances in production (Neon for Postgres, Upstash for Redis, CloudAMQP for RabbitMQ) — same connection string interface either way, swapped via env vars.
-- Frontend deployed to Vercel, pointed at the Gateway's public URL.
-- Every service exposes `/health`, used by both Docker Compose (`depends_on: condition: service_healthy`) and the hosting platform's uptime checks.
-- **Known risk:** free-tier hosts may cold-start/sleep after inactivity. Mitigation: the `docker-compose up` local path always works as a live-demo fallback, independent of hosting uptime.
+The live demo runs the same Compose stack CI tests, on one always-on server (an Oracle Cloud "Always Free" ARM VM), with a third file on top:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.app.yml -f docker-compose.prod.yml up -d --build
+```
+
+```mermaid
+graph LR
+    Internet -->|80 / 443| Caddy[Caddy: HTTPS, certificates]
+    Caddy -->|edge network| Nginx[dashboard nginx]
+    Nginx -->|/api, /ws| Gateway
+    Gateway --> Services[six services, Postgres, RabbitMQ, Redis]
+    Admin[You, over SSH] -. tunnel .-> Grafana & Jaeger
+```
+
+- **One public entry point.** Caddy is the only container with host ports. It obtains and renews a Let's Encrypt certificate for `SITE_ADDRESS` (a free DuckDNS name), redirects HTTP to HTTPS and adds security headers. Postgres, RabbitMQ, Redis and Prometheus get no host ports at all (`!reset`); Grafana and Jaeger are bound to the server's loopback interface and reached through an SSH tunnel.
+- **Client addresses survive two proxies.** Caddy replaces any client-sent `X-Forwarded-For` with the real address; nginx accepts that header only from Caddy's fixed address on a dedicated `edge` network (`TRUSTED_PROXY`), then overwrites it for the Gateway. The per-IP login limit therefore sees each visitor, and a forged header — even from another container — is ignored.
+- **Secrets** live only in the server's `infra/.env`, generated by `scripts/deploy/create_env.sh` (hex, so they are safe inside connection URLs; file mode `600`). Postgres receives only its own three variables, not the whole file. RabbitMQ and Grafana use generated credentials instead of their defaults, and the demo accounts' passwords come from `DEMO_ADMIN_PASSWORD` / `DEMO_SHOPPER_PASSWORD`.
+- **Deploys** are `bash scripts/deploy/deploy.sh`: pull `main`, rebuild changed images on the server (native ARM builds — every base image is multi-architecture), run the migration jobs, restart what changed, prune old images. Migrations run as the one-off `<service>-migrate` jobs, never at service startup, where replicas would race.
+- **Server hygiene** (`scripts/deploy/setup_server.sh`): Docker from Docker's apt repository, container logs capped at 3 × 10 MB, and ports 80/443 opened in the host firewall that Oracle's images ship with.
+- Images listen on `$PORT` (defaulting to the service's local port), run as a non-root user, carry a `HEALTHCHECK` on `/health`, and install only the pinned runtime lock — so the same images also fit a per-service platform later.
+- Inter-service URLs are environment variables (e.g., `ORDER_SERVICE_URL`), never hardcoded, which is what lets the same code run against host ports, Compose service names, or managed services.
+
+Step-by-step instructions, including creating the cloud account: [`docs/DEPLOYMENT.md`](./DEPLOYMENT.md).
 
 ## 10. Observability
 
@@ -535,6 +548,7 @@ Every record carries the active trace ID: `[trace=<id>]` in text mode, `trace_id
 - **Unit tests** (`services/*/tests/unit/`) — business logic and schema validation in isolation (order totals, state transitions, rate limiter math), no DB or broker. Must stay fast enough to run on every save; the Order Service suite runs in ~0.1s.
 - **Integration tests** (`services/*/tests/integration/`) — a throwaway Postgres/Redis/RabbitMQ per session via `testcontainers`, proving the FRs in the PRD (e.g., fire concurrent requests, assert exactly one succeeds). Marked `integration` so the fast loop can be run with `pytest -m "not integration"`.
 - **CI** (`.github/workflows/ci.yml`) — runs the full suite on every push to `main` and every PR; merges blocked on failure. Services are a build matrix, so adding a service is a one-line change.
+- **Coverage** — every suite runs with branch coverage; CI fails a project below 85% and writes each coverage table to the run's summary page. Locally: `pytest --cov=app --cov-branch --cov-report=term-missing` (`--cov=commerce_common` in `libs/common`). The gate catches untested new code; it is not a target to pad, and the lines left uncovered are process wiring (`main.py` startup, `db.py` engine creation) that the test fixtures replace.
 - **End-to-end** (`scripts/smoke_test.py`, the CI `e2e` job) — builds every image, starts the whole stack with the Compose overlay, and places an order through the dashboard's proxy while watching the live socket. The only check that covers the Dockerfiles, migration jobs, Compose wiring and nginx config together.
 
 Three rules the Order Service suite establishes for every service that follows:
@@ -623,8 +637,17 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Prometheus targets from a file selected by the Compose file | The same scrape config serves services on the host and services in containers; the overlay replaces one mounted file instead of maintaining a second config | ✅ Decided |
 | End-to-end smoke test in CI | Unit and integration tests run outside the images, so a broken Dockerfile, migration job, Compose variable or proxy rule would otherwise reach `main` unnoticed | ✅ Decided |
 | Mocked payment gateway interface shape | `charge(amount) -> bool`, `refund(amount)` | ✅ Decided |
+| No distributed lock (Redlock) around charges | The unique constraint on `idempotency_key` already serialises concurrent charges inside the payment transaction; a Redis lock would add a second system to the money path without strengthening that guarantee, and a lock that expires mid-charge would weaken it | ✅ Decided |
+| Payment key derived from the order (`order-<order_id>`), not the shopper's key | Shopper keys are unique per shopper, Payment keys globally; forwarding the shopper's key would let shopper B's order replay shopper A's charge and be marked paid without paying | ✅ Decided |
+| A known payment key with a different order or amount is refused (`409` / `payment.failed`), not replayed | Answering with the stored payment would report another order's money; failing the order at once beats waiting for the reconciler to time it out | ✅ Decided |
+| Passwords over 72 bytes refused when hashing, rejected when verifying | bcrypt ignores everything past 72 bytes, and bcrypt 5 raises instead of truncating, which turned a long login password into a `500` | ✅ Decided |
+| CI coverage gate at 85% branch coverage per project | Catches a feature merged without tests while leaving room for startup wiring the fixtures replace; branch coverage, because line coverage counts an `if` as tested when only one side ever ran | ✅ Decided |
+| Live demo on one Oracle Cloud Always Free VM running Compose, not a per-service platform | Consumers and the reconciler must run continuously, which free tiers that sleep idle services cannot do; one VM runs the exact stack CI tests at no cost, while the per-service images stay ready for a platform later | ✅ Decided |
+| Caddy in front of the dashboard's nginx for HTTPS | Automatic certificate issuance and renewal in a few lines; nginx keeps serving the build and proxying, unchanged between local and production | ✅ Decided |
+| nginx trusts `X-Forwarded-For` only from Caddy's fixed address | Trusting the whole Docker network would include the bridge gateway the host uses; one address means only the TLS proxy can name the client | ✅ Decided |
+| Grafana and Jaeger reachable only through an SSH tunnel | Jaeger has no authentication and traces contain SQL; keeping both off the internet costs nothing for a solo operator | ✅ Decided |
 
 ## 14. Risks
 
-- Free-tier hosting (Render/Railway) may cold-start/sleep for a live demo — mitigated by the `docker-compose up` local fallback (§9).
+- The demo runs on a single VM: a server outage takes it offline, and Oracle may reclaim Always Free instances it considers idle. Mitigation: the deploy is two commands on a new VM, and `docker compose up` locally always works as a fallback.
 - Recommendation Service scope creep — keep it deliberately minimal, it's explicitly not the point of this project (see PRD non-goals).

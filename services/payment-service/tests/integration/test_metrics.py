@@ -17,9 +17,13 @@ def _sample(name: str, labels: dict[str, str] | None = None) -> float:
 
 
 def _charge(
-    session_factory: sessionmaker[Session], *, outcome: str, key: str | None = None
+    session_factory: sessionmaker[Session],
+    *,
+    outcome: str,
+    key: str | None = None,
+    order_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
-    order_id = uuid.uuid4()
+    order_id = order_id or uuid.uuid4()
     db = session_factory()
     try:
         PaymentService(db, gateway=MockPaymentGateway(outcome)).charge(
@@ -49,11 +53,11 @@ def test_a_replayed_charge_is_a_replay_not_an_attempt(
     session_factory: sessionmaker[Session],
 ) -> None:
     key = f"replay-{uuid.uuid4().hex}"
-    _charge(session_factory, outcome="success", key=key)
+    order_id = _charge(session_factory, outcome="success", key=key)
     attempts = _sample("payment_attempts_total", {"result": "succeeded"})
     replays = _sample("payment_idempotent_replays_total")
 
-    _charge(session_factory, outcome="success", key=key)
+    _charge(session_factory, outcome="success", key=key, order_id=order_id)
 
     assert _sample("payment_attempts_total", {"result": "succeeded"}) == attempts
     assert _sample("payment_idempotent_replays_total") == replays + 1
