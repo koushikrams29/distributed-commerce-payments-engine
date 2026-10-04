@@ -25,6 +25,8 @@ class PaymentRead(BaseModel):
     order_id: uuid.UUID
     status: str
     amount: Decimal
+    idempotency_key: str
+    created_at: datetime
     ledger_entries: list[LedgerEntryRead]
 
     @classmethod
@@ -34,5 +36,24 @@ class PaymentRead(BaseModel):
             order_id=payment.order_id,
             status=payment.status,
             amount=payment.amount,
-            ledger_entries=payment.ledger_entries,
+            idempotency_key=payment.idempotency_key,
+            created_at=payment.created_at,
+            ledger_entries=sorted(
+                payment.ledger_entries, key=lambda entry: entry.created_at
+            ),
         )
+
+
+class PaymentListResponse(BaseModel):
+    items: list[PaymentRead]
+    next_cursor: str | None = None
+
+
+class PaymentSummary(BaseModel):
+    counts: dict[str, int]
+    total: int
+    # Ledger totals: debits are money taken from customers, credits money returned.
+    captured_amount: Decimal
+    refunded_amount: Decimal
+    net_amount: Decimal
+    generated_at: datetime

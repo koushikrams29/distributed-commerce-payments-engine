@@ -11,7 +11,7 @@ from app.repositories.inventory_repository import (
     ProductRepository,
     ReservationRepository,
 )
-from app.schemas.inventory import ReserveItem
+from app.schemas.inventory import ProductStock, ReservationActivity, ReserveItem
 
 
 class InsufficientStockError(Exception):
@@ -36,8 +36,44 @@ class InventoryService:
         self.products = ProductRepository(db)
         self.reservations = ReservationRepository(db)
 
-    def list_products(self) -> list[Product]:
-        return self.products.list_all()
+    def list_product_stock(self) -> list[ProductStock]:
+        quantities = self.reservations.quantities_by_product()
+        return [
+            ProductStock(
+                id=product.id,
+                name=product.name,
+                price=product.price,
+                stock_qty=product.stock_qty,
+                reserved_qty=quantities.get((product.id, ReservationStatus.HELD.value), 0),
+                committed_qty=quantities.get(
+                    (product.id, ReservationStatus.COMMITTED.value), 0
+                ),
+            )
+            for product in self.products.list_all()
+        ]
+
+    def list_reservations(
+        self,
+        *,
+        limit: int = 50,
+        order_id: uuid.UUID | None = None,
+        status: str | None = None,
+    ) -> list[ReservationActivity]:
+        return [
+            ReservationActivity(
+                id=reservation.id,
+                order_id=reservation.order_id,
+                product_id=reservation.product_id,
+                product_name=product_name,
+                qty=reservation.qty,
+                status=reservation.status,
+                expires_at=reservation.expires_at,
+                created_at=reservation.created_at,
+            )
+            for reservation, product_name in self.reservations.list_recent(
+                limit=limit, order_id=order_id, status=status
+            )
+        ]
 
     def get_product(self, product_id: uuid.UUID) -> Product | None:
         return self.products.get_by_id(product_id)

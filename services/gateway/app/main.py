@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from commerce_common.auth import Role
 from commerce_common.observability import setup_observability
 
-from app.api.routers import auth, dashboard, proxy
+from app.api.routers import auth, dashboard, ops, proxy
 from app.core.config import settings
 from app.core.db import SessionLocal, engine, get_db
 from app.realtime.events import start_dashboard_event_relay
@@ -65,6 +65,7 @@ async def lifespan(app: FastAPI):
         if settings.rate_limit_enabled
         else None
     )
+    app.state.redis = redis
     app.state.api_limiter, app.state.auth_limiter = _build_limiters(redis)
     app.state.dashboard_hub = DashboardHub()
     if settings.dashboard_events_enabled:
@@ -101,7 +102,8 @@ app.include_router(dashboard.router)
 # Unversioned /auth kept so existing clients and scripts keep working.
 app.include_router(auth.router, include_in_schema=False)
 app.include_router(auth.router, prefix="/api/v1")
-# Must come after the /api/v1 auth routes: its catch-all path would shadow them.
+app.include_router(ops.router)
+# Must come after the /api/v1 auth and ops routes: its catch-all path would shadow them.
 app.include_router(proxy.router)
 
 

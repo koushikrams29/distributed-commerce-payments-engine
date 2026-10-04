@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -45,3 +46,39 @@ class OrderRead(BaseModel):
 class OrderListResponse(BaseModel):
     items: list[OrderRead]
     next_cursor: str | None = None
+
+
+class OrderEventRead(BaseModel):
+    """One outbox row: an event this service emitted about an order."""
+
+    id: uuid.UUID
+    event_type: str
+    payload: dict[str, Any]
+    created_at: datetime
+    # Null while the row waits for the relay.
+    published_at: datetime | None
+    # Trace of the request or message that wrote the row, for linking to Jaeger.
+    trace_id: str | None
+
+
+class OutboxBacklog(BaseModel):
+    unpublished: int
+    oldest_unpublished_at: datetime | None
+
+
+class OverdueOrders(BaseModel):
+    """Orders past the reconciler's timeout for their status."""
+
+    status: str
+    count: int
+    after_minutes: int
+
+
+class OrderSummary(BaseModel):
+    counts: dict[str, int]
+    total: int
+    outbox: OutboxBacklog
+    overdue: list[OverdueOrders]
+    reconciler_enabled: bool
+    reconcile_interval_seconds: float
+    generated_at: datetime

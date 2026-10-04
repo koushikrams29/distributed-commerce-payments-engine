@@ -7,7 +7,10 @@ import type { DashboardEvent } from "../types";
 const CLOSE_UNAUTHENTICATED = 4401;
 const CLOSE_FORBIDDEN = 4403;
 
-export type ConnectionState = "connecting" | "live" | "reconnecting" | "forbidden";
+/** Failed attempts in a row before the console stops saying "reconnecting" and says "offline". */
+export const OFFLINE_AFTER_ATTEMPTS = 3;
+
+export type ConnectionState = "connecting" | "live" | "reconnecting" | "offline" | "forbidden";
 
 interface Options {
   accessToken: string;
@@ -29,6 +32,28 @@ interface RawMessage {
   type?: unknown;
   data?: unknown;
   received_at?: unknown;
+  trace_id?: unknown;
+}
+
+export function parseMessage(raw: string): DashboardEvent | "ready" | null {
+  let parsed: RawMessage;
+  try {
+    parsed = JSON.parse(raw) as RawMessage;
+  } catch {
+    return null;
+  }
+  if (parsed.type === "ready") return "ready";
+  if (typeof parsed.type !== "string") return null;
+  return {
+    type: parsed.type,
+    data:
+      parsed.data && typeof parsed.data === "object" && !Array.isArray(parsed.data)
+        ? (parsed.data as Record<string, unknown>)
+        : {},
+    receivedAt:
+      typeof parsed.received_at === "string" ? parsed.received_at : new Date().toISOString(),
+    traceId: typeof parsed.trace_id === "string" ? parsed.trace_id : null,
+  };
 }
 
 export function useDashboardSocket({
@@ -50,7 +75,8 @@ export function useDashboardSocket({
     let disposed = false;
 
     const connect = () => {
-      setState(attempt === 0 ? "connecting" : "reconnecting");
+      clearTimeout(retryTimer);
+      if (attempt === 0) setState("connecting");
       socket = new WebSocket(socketUrl());
 
       socket.onopen = () => {
@@ -60,30 +86,14 @@ export function useDashboardSocket({
       };
 
       socket.onmessage = (message: MessageEvent<string>) => {
-        let parsed: RawMessage;
-        try {
-          parsed = JSON.parse(message.data) as RawMessage;
-        } catch {
-          return;
-        }
-        if (parsed.type === "ready") {
+        const parsed = parseMessage(message.data);
+        if (parsed === "ready") {
           attempt = 0;
           setState("live");
           handlers.current.onReady();
-          return;
+        } else if (parsed) {
+          handlers.current.onEvent(parsed);
         }
-        if (typeof parsed.type !== "string") return;
-        handlers.current.onEvent({
-          type: parsed.type,
-          data:
-            parsed.data && typeof parsed.data === "object"
-              ? (parsed.data as Record<string, unknown>)
-              : {},
-          receivedAt:
-            typeof parsed.received_at === "string"
-              ? parsed.received_at
-              : new Date().toISOString(),
-        });
       };
 
       socket.onclose = (close: CloseEvent) => {
@@ -99,17 +109,33 @@ export function useDashboardSocket({
           return;
         }
         // Network drop, gateway restart, or 1013 (we fell too far behind).
-        setState("reconnecting");
-        retryTimer = setTimeout(connect, reconnectDelay(attempt));
         attempt += 1;
+        setState(
+          attempt >= OFFLINE_AFTER_ATTEMPTS || !navigator.onLine ? "offline" : "reconnecting",
+        );
+        retryTimer = setTimeout(connect, reconnectDelay(attempt - 1));
       };
     };
+
+    // Coming back online is the moment a retry is most likely to work.
+    const onOnline = () => {
+      if (!socket) {
+        attempt = Math.min(attempt, 1);
+        setState("reconnecting");
+        connect();
+      }
+    };
+    const onOffline = () => setState((current) => (current === "forbidden" ? current : "offline"));
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
 
     connect();
 
     return () => {
       disposed = true;
       clearTimeout(retryTimer);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
       socket?.close(1000, "dashboard closed");
     };
   }, [accessToken]);

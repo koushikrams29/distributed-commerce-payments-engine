@@ -18,8 +18,7 @@ def list_products(
     db: Session = Depends(get_db),
     _admin: AccessTokenPayload = Depends(require_roles(Role.ADMIN)),
 ):
-    products = InventoryService(db).list_products()
-    return ProductListResponse(items=products)
+    return ProductListResponse(items=InventoryService(db).list_product_stock())
 
 
 @router.get("/{product_id}", response_model=ProductDetail)

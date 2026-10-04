@@ -1,3 +1,4 @@
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -22,7 +23,36 @@ from app.core.metrics import RECONCILER_ACTIONS
 from app.models import Order, OrderItem, OrderStatus, OutboxEvent
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
-from app.schemas.order import OrderCreate, OrderListResponse
+from app.schemas.order import (
+    OrderCreate,
+    OrderEventRead,
+    OrderListResponse,
+    OrderSummary,
+    OutboxBacklog,
+    OverdueOrders,
+)
+
+_TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$")
+
+
+def trace_id_from_context(trace_context: dict | None) -> str | None:
+    """The trace ID inside a stored W3C `traceparent`, if there is a valid one."""
+    traceparent = (trace_context or {}).get("traceparent")
+    if not isinstance(traceparent, str):
+        return None
+    match = _TRACEPARENT.match(traceparent)
+    if match is None or set(match.group(1)) == {"0"}:
+        return None
+    return match.group(1)
+
+
+def _reconcile_cutoffs(now: datetime) -> tuple[datetime, datetime, datetime]:
+    """(pending created before, reserved created before, paid updated before)."""
+    return (
+        now - timedelta(minutes=settings.reconcile_pending_after_minutes),
+        now - timedelta(minutes=settings.reconcile_reserved_after_minutes),
+        now - timedelta(minutes=settings.reconcile_paid_after_minutes),
+    )
 
 
 def payment_idempotency_key(order: Order) -> str:
@@ -166,13 +196,7 @@ class OrderService:
         of orders acted on.
         """
         now = datetime.now(UTC)
-        pending_before = now - timedelta(
-            minutes=settings.reconcile_pending_after_minutes
-        )
-        reserved_before = now - timedelta(
-            minutes=settings.reconcile_reserved_after_minutes
-        )
-        paid_before = now - timedelta(minutes=settings.reconcile_paid_after_minutes)
+        pending_before, reserved_before, paid_before = _reconcile_cutoffs(now)
         acted_on = 0
 
         for order in self.repository.list_stuck_orders(
@@ -296,9 +320,17 @@ class OrderService:
         limit: int = 20,
         status: str | None = None,
         cursor: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
     ) -> OrderListResponse:
         after = decode_cursor(cursor) if cursor else None
-        rows = self.repository.list_orders(limit=limit, status=status, after=after)
+        rows = self.repository.list_orders(
+            limit=limit,
+            status=status,
+            after=after,
+            created_from=created_from,
+            created_to=created_to,
+        )
 
         next_cursor = None
         if len(rows) > limit:
@@ -306,6 +338,66 @@ class OrderService:
             next_cursor = encode_cursor(rows[-1])
 
         return OrderListResponse(items=rows, next_cursor=next_cursor)
+
+    def list_events(self, order_id: uuid.UUID) -> list[OrderEventRead] | None:
+        """Every event emitted about the order, oldest first; None if no such order.
+
+        Each status transition writes an order.status_changed row, so this is
+        the order's saga history as this service recorded it.
+        """
+        if self.repository.get_by_id(order_id) is None:
+            return None
+        return [
+            OrderEventRead(
+                id=event.id,
+                event_type=event.event_type,
+                payload=event.payload_json,
+                created_at=event.created_at,
+                published_at=event.published_at,
+                trace_id=trace_id_from_context(event.trace_context),
+            )
+            for event in self.outbox.list_for_aggregate(order_id)
+        ]
+
+    def summary(self) -> OrderSummary:
+        now = datetime.now(UTC)
+        counts = self.repository.count_by_status()
+        pending_before, reserved_before, paid_before = _reconcile_cutoffs(now)
+        unpublished, oldest_unpublished_at = self.outbox.backlog()
+        overdue = [
+            OverdueOrders(
+                status=OrderStatus.PENDING.value,
+                count=self.repository.count_overdue(
+                    status=OrderStatus.PENDING.value, created_before=pending_before
+                ),
+                after_minutes=settings.reconcile_pending_after_minutes,
+            ),
+            OverdueOrders(
+                status=OrderStatus.RESERVED.value,
+                count=self.repository.count_overdue(
+                    status=OrderStatus.RESERVED.value, created_before=reserved_before
+                ),
+                after_minutes=settings.reconcile_reserved_after_minutes,
+            ),
+            OverdueOrders(
+                status=OrderStatus.PAID.value,
+                count=self.repository.count_overdue(
+                    status=OrderStatus.PAID.value, updated_before=paid_before
+                ),
+                after_minutes=settings.reconcile_paid_after_minutes,
+            ),
+        ]
+        return OrderSummary(
+            counts={status.value: counts.get(status.value, 0) for status in OrderStatus},
+            total=sum(counts.values()),
+            outbox=OutboxBacklog(
+                unpublished=unpublished, oldest_unpublished_at=oldest_unpublished_at
+            ),
+            overdue=overdue,
+            reconciler_enabled=settings.reconcile_enabled,
+            reconcile_interval_seconds=settings.reconcile_poll_interval_seconds,
+            generated_at=now,
+        )
 
     def _enqueue_order_created(self, order: Order) -> None:
         self.outbox.add(
