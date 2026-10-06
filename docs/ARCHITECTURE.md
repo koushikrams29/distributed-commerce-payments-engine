@@ -345,7 +345,7 @@ A trace ID generated at the Gateway propagates through every HTTP call, queue me
 - **AuthZ:** Two roles, `shopper` and `admin`, carried as a claim in the JWT. Admin-only endpoints (dashboard reads, full order/payment lists) are enforced by a FastAPI dependency that checks the role claim — not by trusting the frontend to hide buttons.
 - **Defense in depth:** downstream services (Order, Inventory, Payment, Recommendation) verify the JWT themselves via `libs/common` (`commerce_common.auth`), rather than blindly trusting requests forwarded by the Gateway. A service is never exploitable by being called directly, bypassing the Gateway.
 - **Secrets management:** local dev via a git-ignored `.env` file (see `.env.example` for required keys); production secrets live in the hosting platform's env var store — never committed.
-- **Rate limiting as a security control:** the token bucket limiter on `/auth/login` doubles as brute-force/credential-stuffing protection, not just general abuse prevention. (Not yet implemented — planned with Redis.)
+- **Rate limiting as a security control:** the token bucket limiter on `/auth/login` doubles as brute-force/credential-stuffing protection, not just general abuse prevention: the `auth` bucket (§4) allows a burst of 5 attempts per client IP, then one every 12 seconds.
 - **Relevant OWASP Top 10 coverage:** injection (parameterized queries via SQLAlchemy, never string-built SQL), broken authentication (short-lived access tokens + refresh rotation), security misconfiguration (no default credentials, secrets never in source control).
 - **Dev seed users** (when `SEED_DEV_USERS=true`): `shopper@example.com` / `shopper-pass-123` and `admin@example.com` / `admin-pass-123`. Local only — never enable in production.
 
