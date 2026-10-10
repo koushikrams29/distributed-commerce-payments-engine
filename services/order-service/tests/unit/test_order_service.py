@@ -5,7 +5,11 @@ import pytest
 
 from app.models import OrderStatus
 from app.schemas.order import OrderCreate, OrderItemCreate
-from app.services.order_service import OrderService, trace_id_from_context
+from app.services.order_service import (
+    OrderService,
+    order_request_fingerprint,
+    trace_id_from_context,
+)
 
 
 def _payload(*quantities: int) -> OrderCreate:
@@ -49,6 +53,29 @@ def test_idempotency_key_is_carried_onto_the_order() -> None:
 
     assert order.idempotency_key == payload.idempotency_key
     assert order.user_id == user_id
+
+
+def test_request_fingerprint_is_stable_for_equivalent_item_lists() -> None:
+    first, second = uuid.uuid4(), uuid.uuid4()
+    split = OrderCreate(
+        idempotency_key="fingerprint-key",
+        items=[
+            OrderItemCreate(product_id=first, qty=1),
+            OrderItemCreate(product_id=second, qty=2),
+            OrderItemCreate(product_id=first, qty=2),
+        ],
+    )
+    aggregated = OrderCreate(
+        idempotency_key="another-key",
+        items=[
+            OrderItemCreate(product_id=first, qty=3),
+            OrderItemCreate(product_id=second, qty=2),
+        ],
+    )
+
+    assert order_request_fingerprint(split) == order_request_fingerprint(
+        aggregated
+    )
 
 
 @pytest.mark.parametrize(

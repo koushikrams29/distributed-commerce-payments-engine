@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -93,7 +95,7 @@ class OrderService:
             user_id=user_id, idempotency_key=payload.idempotency_key
         )
         if existing is not None:
-            return existing, False
+            return self._replay(existing, payload=payload), False
 
         prices = self._fetch_prices(payload, access_token=access_token)
         order = self._build_order(payload, user_id=user_id, prices=prices)
@@ -111,10 +113,31 @@ class OrderService:
             )
             if existing is None:
                 raise
-            return existing, False
+            return self._replay(existing, payload=payload), False
 
         self.db.refresh(order)
         return order, True
+
+    def _replay(self, existing: Order, *, payload: OrderCreate) -> Order:
+        fingerprint = order_request_fingerprint(payload)
+        if existing.request_fingerprint is not None:
+            matches = existing.request_fingerprint == fingerprint
+        else:
+            # Backward compatibility for rows created before the fingerprint
+            # column existed. Compare their durable items, then lazily record
+            # the fingerprint after a valid replay.
+            recorded: dict[uuid.UUID, int] = {}
+            for item in existing.items:
+                recorded[item.product_id] = recorded.get(item.product_id, 0) + item.qty
+            matches = recorded == normalized_order_items(payload)
+            if matches:
+                existing.request_fingerprint = fingerprint
+                self.db.commit()
+        if not matches:
+            raise IdempotencyKeyReusedError(
+                "idempotency key already used with a different order payload"
+            )
+        return existing
 
     # Every event handler locks the order row first, so two handlers (or a
     # handler and the reconciler) can never both act on the same old status.
@@ -519,7 +542,31 @@ class OrderService:
         return Order(
             user_id=user_id,
             idempotency_key=payload.idempotency_key,
+            request_fingerprint=order_request_fingerprint(payload),
             status=OrderStatus.PENDING.value,
             total_amount=sum(item.unit_price * item.qty for item in items),
             items=items,
         )
+
+
+class IdempotencyKeyReusedError(Exception):
+    """The user's key already belongs to a different order request."""
+
+
+def normalized_order_items(payload: OrderCreate) -> dict[uuid.UUID, int]:
+    """Semantic item quantities, independent of input order or split lines."""
+    quantities: dict[uuid.UUID, int] = {}
+    for item in payload.items:
+        quantities[item.product_id] = quantities.get(item.product_id, 0) + item.qty
+    return quantities
+
+
+def order_request_fingerprint(payload: OrderCreate) -> str:
+    canonical = [
+        {"product_id": str(product_id), "qty": qty}
+        for product_id, qty in sorted(
+            normalized_order_items(payload).items(), key=lambda pair: str(pair[0])
+        )
+    ]
+    encoded = json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
