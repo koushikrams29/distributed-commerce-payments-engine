@@ -74,7 +74,7 @@ _Summarised here; the full log with reasoning (60+ entries) is in [`docs/ARCHITE
 - **Gateway** — login with rotating refresh tokens, JWT verification at the edge, per-user and per-IP rate limits, routing to the services, and the WebSocket hub that streams every event to the dashboard.
 - **Order Service** — the order state machine and saga orchestrator, with the outbox relay and the stuck-order reconciler.
 - **Inventory Service** — stock reservation with row-level locks so concurrent orders cannot oversell; commit and release are idempotent.
-- **Payment Service** (mocked gateway) — at most one charge per order, refunds, and an append-only debit/credit ledger.
+- **Payment Service** (mocked gateway) — at most one charge submission per order, explicit unknown outcomes, provider-status reconciliation, refunds, and an append-only debit/credit journal.
 - **Notification Service** — consumes `order.fulfilled` and records a (fake) confirmation email, once per order.
 - **Recommendation Service** — counts how often products are bought together from paid orders and serves "frequently bought with" lists.
 - **Operations console** (React + TypeScript, no UI framework) — answers "is the system healthy right now?" from service health, queue depths, outbox lag and overdue orders; searchable orders with a per-order saga view and a timeline merged from every service's records; a filterable live event console; the payment ledger; stock flow from available to reserved to committed; and dead-letter inspection with confirmed replay. Every trace ID links to Jaeger.
@@ -83,7 +83,7 @@ _Summarised here; the full log with reasoning (60+ entries) is in [`docs/ARCHITE
 
 - **Tracing:** one trace follows an order from the HTTP request through the outbox, RabbitMQ and every consumer down to the SQL statements; log lines carry the trace ID.
 - **Metrics:** Prometheus scrapes every service; the provisioned Grafana dashboard covers HTTP latency and errors, order transitions, payment success rate, stock reservations, message outcomes, dead letters, outbox lag and rate-limit decisions.
-- **Failure handling:** delayed retries, dead-letter queues that can be inspected and replayed from the console (or a CLI), a reconciler for stuck orders, and refunds for late charges.
+- **Failure handling:** delayed retries, dead-letter queues that can be inspected and replayed from the console (or a CLI), reconcilers for stuck orders and ambiguous payments, and refunds for late charges.
 - **Security:** bcrypt passwords, short-lived access tokens, hashed rotating refresh tokens, and every service verifying the JWT itself (defense in depth); only the dashboard's nginx is exposed.
 
 ## 7. Tech stack

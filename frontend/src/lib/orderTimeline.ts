@@ -124,6 +124,7 @@ export function buildTimeline({ events, payment, reservations, liveEvents }: Tim
   if (payment) {
     const outcome: Record<Payment["status"], [string, Tone]> = {
       pending: ["Charge pending", "info"],
+      unknown: ["Charge outcome unknown", "warning"],
       succeeded: ["Charge succeeded", "success"],
       failed: ["Charge declined", "danger"],
       refunded: ["Charge captured, later refunded", "warning"],

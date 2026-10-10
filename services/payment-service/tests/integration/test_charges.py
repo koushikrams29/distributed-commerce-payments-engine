@@ -129,3 +129,24 @@ def test_charge_fails_when_mock_gateway_declines(
     body = response.json()
     assert body["status"] == "failed"
     assert body["ledger_entries"] == []
+
+
+def test_charge_timeout_returns_unknown_without_a_ledger_entry(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config.settings, "mock_payment_outcome", "timeout")
+
+    response = client.post(
+        "/charges",
+        json={
+            "order_id": str(uuid.uuid4()),
+            "amount": "99.00",
+            "idempotency_key": "timeout-key",
+        },
+        headers=auth_header(),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "unknown"
+    assert response.json()["ledger_entries"] == []
+    assert "timed out" in response.json()["last_error"]

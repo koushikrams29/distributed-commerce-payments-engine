@@ -10,12 +10,15 @@ from app.api.routers import charges, payments
 from app.core.config import settings
 from app.core.db import engine, get_db
 from app.events.consumers import start_payment_event_consumers
+from app.events.reconciler import start_payment_reconciler
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     if settings.use_event_bus:
         start_payment_event_consumers()
+        if settings.payment_reconcile_enabled:
+            start_payment_reconciler()
     yield
 
 

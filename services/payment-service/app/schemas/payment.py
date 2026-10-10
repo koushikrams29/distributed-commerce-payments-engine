@@ -26,7 +26,10 @@ class PaymentRead(BaseModel):
     status: str
     amount: Decimal
     idempotency_key: str
+    gateway_reference: str | None
+    last_error: str | None
     created_at: datetime
+    updated_at: datetime
     ledger_entries: list[LedgerEntryRead]
 
     @classmethod
@@ -37,7 +40,10 @@ class PaymentRead(BaseModel):
             status=payment.status,
             amount=payment.amount,
             idempotency_key=payment.idempotency_key,
+            gateway_reference=payment.gateway_reference,
+            last_error=payment.last_error,
             created_at=payment.created_at,
+            updated_at=payment.updated_at,
             ledger_entries=sorted(
                 payment.ledger_entries, key=lambda entry: entry.created_at
             ),

@@ -136,6 +136,9 @@ def publish_event(
         try:
             channel = connection.channel()
             declare_exchange(channel)
+            # The caller may only record an outbox row/result as published
+            # after RabbitMQ confirms accepting the persistent message.
+            channel.confirm_delivery()
             channel.basic_publish(
                 exchange=EVENT_EXCHANGE,
                 routing_key=routing_key,
@@ -143,6 +146,7 @@ def publish_event(
                 properties=pika.BasicProperties(
                     delivery_mode=2, content_type="application/json", headers=headers
                 ),
+                mandatory=True,
             )
         finally:
             connection.close()

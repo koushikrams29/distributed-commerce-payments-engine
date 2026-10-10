@@ -125,7 +125,13 @@ class TestSummary:
 
         body = client.get("/payments/summary", headers=auth_header()).json()
 
-        assert body["counts"] == {"pending": 0, "succeeded": 1, "failed": 1, "refunded": 1}
+        assert body["counts"] == {
+            "pending": 0,
+            "unknown": 0,
+            "succeeded": 1,
+            "failed": 1,
+            "refunded": 1,
+        }
         assert body["total"] == 3
         # A declined charge never touches the ledger.
         assert Decimal(body["captured_amount"]) == Decimal("130.00")

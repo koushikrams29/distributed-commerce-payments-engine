@@ -290,14 +290,18 @@ class OrderService:
                 db.commit()
                 return
 
-            order.status = OrderStatus.CANCELLED.value
-            db.commit()
-            try:
-                self.inventory.release(
-                    order_id=order.id, access_token=access_token
-                )
-            except InventoryUnavailableError:
-                return
+            if result.status == "failed":
+                order.status = OrderStatus.CANCELLED.value
+                db.commit()
+                try:
+                    self.inventory.release(
+                        order_id=order.id, access_token=access_token
+                    )
+                except InventoryUnavailableError:
+                    return
+            # pending/unknown is deliberately not treated as a decline. The
+            # outcome may still be a successful charge, so releasing stock now
+            # would risk selling paid-for units to another customer.
         finally:
             db.close()
 

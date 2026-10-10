@@ -282,7 +282,10 @@ interface PaymentDto {
   status: string;
   amount: string;
   idempotency_key: string;
+  gateway_reference: string | null;
+  last_error: string | null;
   created_at: string;
+  updated_at: string;
   ledger_entries: { id: string; direction: string; amount: string; created_at: string }[];
 }
 
@@ -293,7 +296,10 @@ function toPayment(dto: PaymentDto): Payment {
     status: isPaymentStatus(dto.status) ? dto.status : "pending",
     amount: Number(dto.amount),
     idempotencyKey: dto.idempotency_key,
+    gatewayReference: dto.gateway_reference,
+    lastError: dto.last_error,
     createdAt: dto.created_at,
+    updatedAt: dto.updated_at,
     ledger: dto.ledger_entries.map(
       (entry): LedgerEntry => ({
         id: entry.id,

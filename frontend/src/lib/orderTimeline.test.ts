@@ -46,7 +46,10 @@ const payment: Payment = {
   status: "succeeded",
   amount: 40,
   idempotencyKey: "charge-1",
+  gatewayReference: "mock-charge-1",
+  lastError: null,
   createdAt: at(2),
+  updatedAt: at(2),
   ledger: [{ id: "l1", direction: "debit", amount: 40, createdAt: at(2.5) }],
 };
 

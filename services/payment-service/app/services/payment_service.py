@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy.exc import IntegrityError
@@ -7,13 +7,19 @@ from sqlalchemy.orm import Session
 
 from commerce_common.pagination import decode_cursor, encode_cursor
 
+from app.core.config import settings
 from app.core.metrics import (
     PAYMENT_ATTEMPTS,
     PAYMENT_CAPTURED_AMOUNT,
     PAYMENT_REFUNDS,
     PAYMENT_REPLAYS,
 )
-from app.gateway.mock import MockPaymentGateway
+from app.gateway.mock import (
+    GatewayResult,
+    GatewayStatus,
+    GatewayTimeoutError,
+    MockPaymentGateway,
+)
 from app.models import LedgerDirection, LedgerEntry, Payment, PaymentStatus
 from app.repositories.payment_repository import PaymentRepository
 from app.schemas.payment import PaymentListResponse, PaymentRead, PaymentSummary
@@ -39,6 +45,7 @@ class PaymentService:
         order_id: uuid.UUID,
         amount: Decimal,
         idempotency_key: str,
+        context: dict | None = None,
     ) -> tuple[Payment, bool]:
         """Attempt a charge once per idempotency key (FR-3).
 
@@ -55,11 +62,15 @@ class PaymentService:
             idempotency_key=idempotency_key,
             amount=amount,
             status=PaymentStatus.PENDING.value,
+            context_json=context,
         )
 
         try:
             self.repository.add(payment)
-            self.db.flush()
+            # Commit the idempotency claim before external I/O. If the process
+            # dies after the provider sees the request, a retry finds this row
+            # and never submits a second charge.
+            self.db.commit()
         except IntegrityError:
             self.db.rollback()
             existing = self.repository.get_by_idempotency_key(idempotency_key)
@@ -67,24 +78,66 @@ class PaymentService:
                 raise
             return self._replay(existing, order_id=order_id, amount=amount), False
 
-        if self.gateway.charge(amount):
-            payment.status = PaymentStatus.SUCCEEDED.value
-            self.repository.add_ledger_entry(
-                LedgerEntry(
-                    payment_id=payment.id,
-                    direction=LedgerDirection.DEBIT.value,
-                    amount=amount,
-                )
+        self.db.refresh(payment)
+        try:
+            result = self.gateway.charge(
+                amount, idempotency_key=idempotency_key
             )
+        except GatewayTimeoutError as exc:
+            payment = self._set_unknown(payment.id, error=str(exc))
+        else:
+            payment = self._apply_gateway_result(payment.id, result)
+
+        PAYMENT_ATTEMPTS.labels(payment.status).inc()
+        return payment, True
+
+    def _set_unknown(self, payment_id: uuid.UUID, *, error: str) -> Payment:
+        payment = self.repository.get_by_id_for_update(payment_id)
+        if payment is None:
+            raise RuntimeError(f"payment disappeared during charge: {payment_id}")
+        if payment.status == PaymentStatus.PENDING.value:
+            payment.status = PaymentStatus.UNKNOWN.value
+            payment.last_error = error[:500]
+            self.db.commit()
+            self.db.refresh(payment)
+        return payment
+
+    def _apply_gateway_result(
+        self, payment_id: uuid.UUID, result: GatewayResult
+    ) -> Payment:
+        payment = self.repository.get_by_id_for_update(payment_id)
+        if payment is None:
+            raise RuntimeError(f"payment disappeared during charge: {payment_id}")
+        if payment.status not in {
+            PaymentStatus.PENDING.value,
+            PaymentStatus.UNKNOWN.value,
+        }:
+            return payment
+
+        payment.gateway_reference = result.reference
+        payment.last_error = None
+        captured = False
+        if result.status == GatewayStatus.SUCCEEDED:
+            payment.status = PaymentStatus.SUCCEEDED.value
+            if not any(
+                entry.direction == LedgerDirection.DEBIT.value
+                for entry in payment.ledger_entries
+            ):
+                self.repository.add_ledger_entry(
+                    LedgerEntry(
+                        payment_id=payment.id,
+                        direction=LedgerDirection.DEBIT.value,
+                        amount=payment.amount,
+                    )
+                )
+                captured = True
         else:
             payment.status = PaymentStatus.FAILED.value
-
         self.db.commit()
-        PAYMENT_ATTEMPTS.labels(payment.status).inc()
-        if payment.status == PaymentStatus.SUCCEEDED.value:
-            PAYMENT_CAPTURED_AMOUNT.inc(float(amount))
+        if captured:
+            PAYMENT_CAPTURED_AMOUNT.inc(float(payment.amount))
         self.db.refresh(payment)
-        return payment, True
+        return payment
 
     @staticmethod
     def _replay(existing: Payment, *, order_id: uuid.UUID, amount: Decimal) -> Payment:
@@ -118,6 +171,56 @@ class PaymentService:
         self.db.commit()
         PAYMENT_REFUNDS.inc(len(refunded))
         return refunded
+
+    def reconcile_unresolved(self) -> list[Payment]:
+        """Resolve stale attempts by provider lookup, never by charging again.
+
+        The returned terminal rows still need their saga outcome reported. Rows
+        remain eligible until the publisher marks them, so a crash cannot strand
+        a paid order merely because its first reply event was lost.
+        """
+        cutoff = datetime.now(UTC) - timedelta(
+            seconds=settings.payment_reconcile_after_seconds
+        )
+        candidates = self.repository.list_reconcilable(unresolved_before=cutoff)
+        reportable: dict[uuid.UUID, Payment] = {}
+        for candidate in candidates:
+            if candidate.status in {
+                PaymentStatus.PENDING.value,
+                PaymentStatus.UNKNOWN.value,
+            }:
+                result = self.gateway.lookup(
+                    idempotency_key=candidate.idempotency_key
+                )
+                if result is None:
+                    if candidate.status == PaymentStatus.PENDING.value:
+                        candidate = self._set_unknown(
+                            candidate.id,
+                            error="provider lookup could not determine the outcome",
+                        )
+                    continue
+                candidate = self._apply_gateway_result(candidate.id, result)
+            if (
+                candidate.status
+                in {PaymentStatus.SUCCEEDED.value, PaymentStatus.FAILED.value}
+                and candidate.outcome_reported_at is None
+            ):
+                reportable[candidate.id] = candidate
+        return list(reportable.values())
+
+    def mark_outcome_reported(self, payment_id: uuid.UUID) -> None:
+        payment = self.repository.get_by_id_for_update(payment_id)
+        if payment is None or payment.outcome_reported_at is not None:
+            self.db.rollback()
+            return
+        if payment.status not in {
+            PaymentStatus.SUCCEEDED.value,
+            PaymentStatus.FAILED.value,
+        }:
+            self.db.rollback()
+            return
+        payment.outcome_reported_at = datetime.now(UTC)
+        self.db.commit()
 
     def get_payment_for_order(self, order_id: uuid.UUID) -> Payment | None:
         return self.repository.get_by_order_id(order_id)
