@@ -75,6 +75,7 @@ class FakeInventoryClient:
 class FakePaymentClient:
     def __init__(self, *, charge_ok: bool = True):
         self.charge_ok = charge_ok
+        self.status_override: str | None = None
         self.charge_calls: list[uuid.UUID] = []
 
     def charge(
@@ -90,7 +91,8 @@ class FakePaymentClient:
         return ChargeResult(
             payment_id=uuid.uuid4(),
             order_id=order_id,
-            status="succeeded" if self.charge_ok else "failed",
+            status=self.status_override
+            or ("succeeded" if self.charge_ok else "failed"),
             amount=amount,
         )
 

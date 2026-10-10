@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import LedgerEntry, Payment
@@ -29,6 +29,37 @@ class PaymentRepository:
             .options(selectinload(Payment.ledger_entries))
         )
         return self.db.execute(stmt).scalar_one_or_none()
+
+    def get_by_id_for_update(self, payment_id: uuid.UUID) -> Payment | None:
+        stmt = (
+            select(Payment)
+            .where(Payment.id == payment_id)
+            .with_for_update()
+            .options(selectinload(Payment.ledger_entries))
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def list_reconcilable(
+        self, *, unresolved_before: datetime, limit: int = 100
+    ) -> list[Payment]:
+        stmt = (
+            select(Payment)
+            .where(
+                or_(
+                    and_(
+                        Payment.status.in_(["pending", "unknown"]),
+                        Payment.updated_at < unresolved_before,
+                    ),
+                    and_(
+                        Payment.status.in_(["succeeded", "failed"]),
+                        Payment.outcome_reported_at.is_(None),
+                    ),
+                )
+            )
+            .order_by(Payment.updated_at.asc())
+            .limit(limit)
+        )
+        return list(self.db.execute(stmt).scalars().all())
 
     def list_for_order_for_update(self, order_id: uuid.UUID) -> list[Payment]:
         stmt = (

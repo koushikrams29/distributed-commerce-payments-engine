@@ -135,3 +135,33 @@ def test_failed_payment_cancels_and_releases_stock(
         assert fake_inventory.release_calls == [order_id]
     finally:
         db.close()
+
+
+def test_unknown_payment_keeps_stock_reserved(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    fake_inventory: FakeInventoryClient,
+    fake_payment: FakePaymentClient,
+) -> None:
+    fake_payment.status_override = "unknown"
+    response = client.post(
+        "/orders", json=order_payload(fresh_key()), headers=auth_header()
+    )
+    order_id = uuid.UUID(response.json()["id"])
+
+    with session_factory() as db:
+        service = OrderService(db, inventory=fake_inventory, payment=fake_payment)
+        order = OrderRepository(db).get_by_id(order_id)
+        assert order is not None
+        if order.status == OrderStatus.PENDING.value:
+            service.reserve_inventory(order_id, access_token="test-token")
+        db.expire_all()
+        order = OrderRepository(db).get_by_id(order_id)
+        assert order is not None
+        if order.status == OrderStatus.RESERVED.value:
+            service.charge_payment(order_id, access_token="test-token")
+        db.expire_all()
+        order = OrderRepository(db).get_by_id(order_id)
+        assert order is not None
+        assert order.status == OrderStatus.RESERVED.value
+        assert fake_inventory.release_calls == []

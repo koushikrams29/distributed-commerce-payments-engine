@@ -8,7 +8,13 @@ export const ORDER_STATUSES = [
 
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
-export const PAYMENT_STATUSES = ["pending", "succeeded", "failed", "refunded"] as const;
+export const PAYMENT_STATUSES = [
+  "pending",
+  "unknown",
+  "succeeded",
+  "failed",
+  "refunded",
+] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
 export const RESERVATION_STATUSES = ["held", "committed", "released"] as const;
@@ -84,7 +90,10 @@ export interface Payment {
   status: PaymentStatus;
   amount: number;
   idempotencyKey: string;
+  gatewayReference: string | null;
+  lastError: string | null;
   createdAt: string;
+  updatedAt: string;
   ledger: LedgerEntry[];
 }
 

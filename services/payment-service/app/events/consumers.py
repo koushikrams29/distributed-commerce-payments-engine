@@ -8,7 +8,7 @@ from commerce_common.messaging import publish_event, run_consumer
 
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.models import PaymentStatus
+from app.models import Payment, PaymentStatus
 from app.services.payment_service import IdempotencyKeyReusedError, PaymentService
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,9 @@ def _handle_charge_requested(_routing_key: str, payload: dict[str, Any]) -> None
                 order_id=order_id,
                 amount=amount,
                 idempotency_key=idempotency_key,
+                context=(
+                    {"items": payload["items"]} if payload.get("items") else None
+                ),
             )
         except IdempotencyKeyReusedError as exc:
             logger.warning("refused charge for order %s: %s", order_id, exc)
@@ -36,28 +39,16 @@ def _handle_charge_requested(_routing_key: str, payload: dict[str, Any]) -> None
                 {"order_id": str(order_id), "amount": str(amount), "reason": str(exc)},
             )
             return
-        if payment.status == PaymentStatus.SUCCEEDED.value:
-            event_payload = {
-                "order_id": str(order_id),
-                "payment_id": str(payment.id),
-                "amount": str(payment.amount),
-            }
-            if payload.get("items"):
-                event_payload["items"] = payload["items"]
-            publish_event(
-                settings.rabbitmq_url,
-                EventType.PAYMENT_SUCCEEDED,
-                event_payload,
-            )
+        if payment.status in {
+            PaymentStatus.SUCCEEDED.value,
+            PaymentStatus.FAILED.value,
+        }:
+            _publish_payment_outcome(PaymentService(db), payment)
         else:
-            publish_event(
-                settings.rabbitmq_url,
-                EventType.PAYMENT_FAILED,
-                {
-                    "order_id": str(order_id),
-                    "payment_id": str(payment.id),
-                    "amount": str(payment.amount),
-                },
+            logger.warning(
+                "payment outcome unresolved; awaiting reconciliation payment_id=%s status=%s",
+                payment.id,
+                payment.status,
             )
     finally:
         db.close()
@@ -80,6 +71,23 @@ def _handle_refund_requested(_routing_key: str, payload: dict[str, Any]) -> None
             )
     finally:
         db.close()
+
+
+def _publish_payment_outcome(service: PaymentService, payment: Payment) -> None:
+    event_payload: dict[str, Any] = {
+        "order_id": str(payment.order_id),
+        "payment_id": str(payment.id),
+        "amount": str(payment.amount),
+    }
+    if payment.context_json and payment.context_json.get("items"):
+        event_payload["items"] = payment.context_json["items"]
+    routing_key = (
+        EventType.PAYMENT_SUCCEEDED
+        if payment.status == PaymentStatus.SUCCEEDED.value
+        else EventType.PAYMENT_FAILED
+    )
+    publish_event(settings.rabbitmq_url, routing_key, event_payload)
+    service.mark_outcome_reported(payment.id)
 
 
 def start_payment_event_consumers() -> None:

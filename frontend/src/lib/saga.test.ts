@@ -47,7 +47,10 @@ function payment(status: Payment["status"]): Payment {
     status,
     amount: 40,
     idempotencyKey: "charge-1",
+    gatewayReference: null,
+    lastError: status === "unknown" ? "provider timeout" : null,
     createdAt: at(2),
+    updatedAt: at(2),
     ledger: [],
   };
 }

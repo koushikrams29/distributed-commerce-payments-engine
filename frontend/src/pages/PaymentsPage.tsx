@@ -71,6 +71,7 @@ export function PaymentsPage() {
 
   const totals = summary.data;
   const attempted = totals ? totals.counts.succeeded + totals.counts.failed + totals.counts.refunded : 0;
+  const unresolved = totals ? totals.counts.pending + totals.counts.unknown : 0;
 
   return (
     <div className="page">
@@ -96,8 +97,16 @@ export function PaymentsPage() {
         <Stat
           label="Decline rate"
           value={totals ? formatPercent(attempted ? totals.counts.failed / attempted : null) : "—"}
-          hint={totals ? `${formatCount(totals.counts.failed)} of ${formatCount(attempted)} charges` : undefined}
-          tone={totals && attempted && totals.counts.failed / attempted > 0.2 ? "warning" : undefined}
+          hint={
+            totals
+              ? `${formatCount(totals.counts.failed)} declined · ${formatCount(unresolved)} unresolved`
+              : undefined
+          }
+          tone={
+            totals && (unresolved > 0 || (attempted > 0 && totals.counts.failed / attempted > 0.2))
+              ? "warning"
+              : undefined
+          }
         />
       </div>
       {summary.error && !summary.data && (
@@ -218,9 +227,18 @@ export function PaymentsPage() {
                         <tr className="payload-row">
                           <td colSpan={7}>
                             {payment.ledger.length === 0 ? (
-                              <p className="muted small">
-                                No ledger entries: declined charges move no money.
-                              </p>
+                              <div>
+                                <p className="muted small">
+                                  {payment.status === "unknown"
+                                    ? "No ledger entry: the provider outcome is ambiguous and reconciliation will query it without charging again."
+                                    : payment.status === "pending"
+                                      ? "No ledger entry: the gateway operation has not completed."
+                                      : "No ledger entries: declined charges move no money."}
+                                </p>
+                                {payment.lastError && (
+                                  <p className="form-error small">{payment.lastError}</p>
+                                )}
+                              </div>
                             ) : (
                               <table className="table table--compact table--nested">
                                 <thead>

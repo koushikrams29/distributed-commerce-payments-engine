@@ -15,6 +15,7 @@ const ORDER_TONES: Record<OrderStatus, BadgeTone> = {
 
 const PAYMENT_TONES: Record<PaymentStatus, BadgeTone> = {
   pending: "neutral",
+  unknown: "warning",
   succeeded: "success",
   failed: "danger",
   refunded: "warning",

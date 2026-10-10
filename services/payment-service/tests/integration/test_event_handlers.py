@@ -93,6 +93,21 @@ def test_declined_charge_reports_failed(
     ]
 
 
+def test_ambiguous_charge_waits_for_reconciliation_instead_of_failing_order(
+    published: Published,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config.settings, "mock_payment_outcome", "timeout")
+    order_id = uuid.uuid4()
+
+    consumers._dispatch(EventType.CHARGE_REQUESTED, _charge_requested(order_id))
+
+    [payment] = _payments(session_factory, order_id)
+    assert payment.status == PaymentStatus.UNKNOWN.value
+    assert published == []
+
+
 def test_redelivered_charge_request_charges_once_but_reports_again(
     published: Published, session_factory: sessionmaker[Session]
 ) -> None:
