@@ -58,6 +58,7 @@ orders
   id              UUID PK
   user_id         UUID
   idempotency_key VARCHAR(255) NOT NULL
+  request_fingerprint VARCHAR(64)            -- canonical SHA-256 of requested items
   status          VARCHAR(20)   -- pending | reserved | paid | fulfilled | cancelled
   total_amount    NUMERIC(12,2)
   created_at      TIMESTAMPTZ
@@ -199,7 +200,7 @@ Queue names are validated against a strict pattern and must have a `.dlq` siblin
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
-| POST | `/orders` | shopper (JWT) | `{items: [{product_id, qty}], idempotency_key}` | `201` with the created order; `200` with the existing order when the `(user, idempotency_key)` pair was already used |
+| POST | `/orders` | shopper (JWT) | `{items: [{product_id, qty}], idempotency_key}` | `201` with the created order; `200` when the same `(user, idempotency_key)` and semantic item payload is replayed; `409` when that key is reused with different products or quantities |
 | GET | `/orders/{id}` | shopper (own) / admin (any) | — | `{order_id, status, items, total_amount, timestamps}` |
 | GET | `/orders` | admin | query: `status`, `created_from`, `created_to` (ISO instants with an offset), `cursor`, `limit` (1–100) | cursor-paginated list of orders, newest first |
 | GET | `/orders/summary` | admin | — | `{counts: {status: n}, total, outbox: {unpublished, oldest_unpublished_at}, overdue: [{status, count, after_minutes}], reconciler_enabled, reconcile_interval_seconds, generated_at}` — "overdue" uses the reconciler's own timeouts and clocks |
@@ -626,6 +627,7 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Idempotency enforced by a unique DB constraint, not an application-level check | A check-then-insert has a race window: two concurrent requests with the same key can both pass the check. Only the constraint is a true guarantee; the app-level lookup is a fast path that avoids the exception in the common case | ✅ Decided |
 | `idempotency_key` required, not optional | An optional key would let a caller silently opt out of the exactly-once guarantee the PRD promises; making it mandatory pushes retry-safety onto every client by construction | ✅ Decided |
 | Replayed request returns `200`, not `201` | `201 Created` would assert that a resource was created, which is false on a replay; the caller still receives the order, correctly labelled as pre-existing | ✅ Decided |
+| Order replays verify a canonical request fingerprint | Product quantities are aggregated and sorted before SHA-256 hashing, so harmless item reordering replays successfully while reusing a key for different products or quantities returns `409`; the same check runs after a concurrent unique-constraint race | ✅ Decided |
 | Integration tests use `testcontainers`, not a shared test database | A throwaway container per session means tests never depend on machine state or leftover rows, and CI needs no pre-provisioned database | ✅ Decided |
 | Test dependencies split into `requirements-dev.txt` | Production images should not ship `pytest`, `httpx` (in services that make no HTTP calls), or the Docker client library used by `testcontainers` | ✅ Decided |
 | `alembic.ini` ships with no `sqlalchemy.url` | The connection string is resolved in `env.py` from the environment, so no credentials are committed and tests can point migrations at a throwaway database | ✅ Decided |

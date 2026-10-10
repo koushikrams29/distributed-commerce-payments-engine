@@ -33,6 +33,10 @@ class Order(Base):
     )
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Nullable only for orders created before request fingerprints were added.
+    request_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=OrderStatus.PENDING.value, index=True
     )
