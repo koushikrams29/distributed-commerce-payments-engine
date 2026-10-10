@@ -12,6 +12,7 @@ from app.services.inventory_service import (
     InsufficientStockError,
     InventoryService,
     ProductNotFoundError,
+    ReservationConflictError,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,11 @@ def _handle_order_created(_routing_key: str, payload: dict[str, Any]) -> None:
                     "reservation_id": str(reservations[0].id),
                 },
             )
-        except (InsufficientStockError, ProductNotFoundError) as exc:
+        except (
+            InsufficientStockError,
+            ProductNotFoundError,
+            ReservationConflictError,
+        ) as exc:
             publish_event(
                 settings.rabbitmq_url,
                 EventType.INVENTORY_FAILED,

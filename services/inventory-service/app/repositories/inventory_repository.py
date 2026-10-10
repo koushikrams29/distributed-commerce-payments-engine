@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.models import Product, ReservationStatus, StockReservation
@@ -43,6 +43,19 @@ class ReservationRepository:
         self.db.add(reservation)
         self.db.flush()
         return reservation
+
+    def lock_order(self, order_id: uuid.UUID) -> None:
+        """Serialize reservation commands for one order for this transaction.
+
+        There is no parent order row in this service to lock. A transaction-scoped
+        PostgreSQL advisory lock closes the race between the idempotency lookup and
+        inserting the reservation rows, and is released automatically on commit or
+        rollback (including process failure).
+        """
+        self.db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:order_id, 0))"),
+            {"order_id": str(order_id)},
+        )
 
     def list_held_for_order(
         self, order_id: uuid.UUID, *, for_update: bool = False

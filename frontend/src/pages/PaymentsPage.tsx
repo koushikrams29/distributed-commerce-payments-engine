@@ -78,7 +78,7 @@ export function PaymentsPage() {
         title="Payments"
         description={
           <>
-            Charges and the double-entry ledger behind them. Each order is charged at most once: its
+            Charges and their append-only capture/refund journal. Each order is charged at most once: its
             idempotency key is <span className="mono nowrap">order-&lt;order id&gt;</span>.
           </>
         }

@@ -30,6 +30,14 @@ class ProductNotFoundError(Exception):
         super().__init__(f"product not found: {product_id}")
 
 
+class ReservationConflictError(Exception):
+    """An order ID was replayed with a different set of products or quantities."""
+
+    def __init__(self, order_id: uuid.UUID):
+        self.order_id = order_id
+        super().__init__(f"order {order_id} already has a different reservation")
+
+
 class InventoryService:
     def __init__(self, db: Session):
         self.db = db
@@ -91,11 +99,29 @@ class InventoryService:
         Each product row is locked with SELECT ... FOR UPDATE so two concurrent
         reservations cannot both decide the same unit is available (FR-2).
         """
+        # The first lookup and all subsequent writes must form one serialized
+        # operation. Product locks alone do not protect two deliveries carrying
+        # the same order ID (especially when their product sets differ).
+        self.reservations.lock_order(order_id)
         existing = self.reservations.list_for_order(order_id)
         if existing:
             # Idempotent: a replayed order_id returns its rows whatever their
             # status. Checking only held rows would re-deduct stock for an
             # order that was already committed or released.
+            requested: dict[uuid.UUID, int] = {}
+            recorded: dict[uuid.UUID, int] = {}
+            for item in items:
+                requested[item.product_id] = (
+                    requested.get(item.product_id, 0) + item.qty
+                )
+            for reservation in existing:
+                recorded[reservation.product_id] = (
+                    recorded.get(reservation.product_id, 0) + reservation.qty
+                )
+            if requested != recorded:
+                self.db.rollback()
+                RESERVATION_REQUESTS.labels("conflict").inc()
+                raise ReservationConflictError(order_id)
             RESERVATION_REQUESTS.labels("replayed").inc()
             return existing
 

@@ -9,6 +9,7 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
+docs/CODEBASE_AUDIT.md
 
 #Environment/secrets
 .env 
@@ -28,4 +29,4 @@ dist/
 build/
 
 #Logs
-*.log 
+*.log

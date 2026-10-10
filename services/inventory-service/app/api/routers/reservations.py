@@ -17,6 +17,7 @@ from app.services.inventory_service import (
     InsufficientStockError,
     InventoryService,
     ProductNotFoundError,
+    ReservationConflictError,
 )
 
 router = APIRouter(prefix="/reservations", tags=["reservations"])
@@ -71,6 +72,11 @@ def reserve_stock(
                 "requested": exc.requested,
                 "available": exc.available,
             },
+        ) from exc
+    except ReservationConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="order_id already has a reservation with a different payload",
         ) from exc
 
     return ReserveResponse(order_id=payload.order_id, reservations=reservations)

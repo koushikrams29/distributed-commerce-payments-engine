@@ -11,6 +11,7 @@ from app.schemas.inventory import ReserveItem
 from app.services.inventory_service import (
     InsufficientStockError,
     InventoryService,
+    ReservationConflictError,
 )
 from commerce_common.auth import Role
 from tests.helpers import auth_header, reserve_payload, seed_product
@@ -69,6 +70,79 @@ def test_reserve_is_idempotent_for_the_same_order(
     assert second.status_code == 201
     assert first.json()["reservations"][0]["id"] == second.json()["reservations"][0]["id"]
     assert product_stock(engine, product.id) == 3
+
+
+def test_reusing_order_id_with_different_payload_is_refused(
+    client: TestClient, session_factory: sessionmaker[Session], engine: Engine
+) -> None:
+    product = seed_product(session_factory, stock_qty=5)
+    order_id = uuid.uuid4()
+
+    first = client.post(
+        "/reservations",
+        json=reserve_payload(product_id=product.id, qty=2, order_id=order_id),
+        headers=auth_header(),
+    )
+    conflict = client.post(
+        "/reservations",
+        json=reserve_payload(product_id=product.id, qty=1, order_id=order_id),
+        headers=auth_header(),
+    )
+
+    assert first.status_code == 201
+    assert conflict.status_code == 409
+    assert product_stock(engine, product.id) == 3
+
+
+def test_concurrent_duplicate_reservations_deduct_stock_once(
+    session_factory: sessionmaker[Session], engine: Engine
+) -> None:
+    product = seed_product(session_factory, stock_qty=5)
+    order_id = uuid.uuid4()
+    barrier = threading.Barrier(2)
+
+    def attempt() -> uuid.UUID:
+        with session_factory() as db:
+            barrier.wait(timeout=10)
+            reservations = InventoryService(db).reserve(
+                order_id=order_id,
+                items=[ReserveItem(product_id=product.id, qty=2)],
+            )
+            return reservations[0].id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(attempt), pool.submit(attempt)]
+        ids = [future.result() for future in futures]
+
+    assert ids[0] == ids[1]
+    assert product_stock(engine, product.id) == 3
+
+
+def test_concurrent_conflicting_reservations_do_not_deduct_twice(
+    session_factory: sessionmaker[Session], engine: Engine
+) -> None:
+    product = seed_product(session_factory, stock_qty=5)
+    order_id = uuid.uuid4()
+    barrier = threading.Barrier(2)
+
+    def attempt(qty: int) -> str:
+        with session_factory() as db:
+            barrier.wait(timeout=10)
+            try:
+                InventoryService(db).reserve(
+                    order_id=order_id,
+                    items=[ReserveItem(product_id=product.id, qty=qty)],
+                )
+                return "reserved"
+            except ReservationConflictError:
+                return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(attempt, 1), pool.submit(attempt, 2)]
+        results = [future.result() for future in futures]
+
+    assert sorted(results) == ["conflict", "reserved"]
+    assert product_stock(engine, product.id) in {3, 4}
 
 
 def test_concurrent_reservations_do_not_oversell(

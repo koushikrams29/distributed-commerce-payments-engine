@@ -146,6 +146,19 @@ def test_unknown_resource_returns_404(
     assert upstream.requests == []
 
 
+@pytest.mark.parametrize(
+    "path", ["charges", "reservations", "reservations/o1/release"]
+)
+@pytest.mark.parametrize("role", [Role.SHOPPER, Role.ADMIN])
+def test_internal_commands_are_not_exposed_at_the_public_gateway(
+    client: TestClient, upstream: Upstream, path: str, role: Role
+) -> None:
+    response = client.post(f"/api/v1/{path}", headers=_auth(role))
+
+    assert response.status_code == 404
+    assert upstream.requests == []
+
+
 def test_unreachable_service_returns_502(
     client: TestClient, upstream: Upstream
 ) -> None:

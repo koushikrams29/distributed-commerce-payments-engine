@@ -20,6 +20,7 @@ router = APIRouter(prefix="/api/v1", tags=["proxy"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
 PROXIED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+INTERNAL_COMMAND_RESOURCES = frozenset({"charges", "reservations"})
 
 
 def require_access_token(
@@ -47,6 +48,14 @@ async def proxy(
     limiter: TokenBucketLimiter | None = Depends(get_api_limiter),
     client: httpx.AsyncClient = Depends(get_http_client),
 ):
+    resource = path.split("/", 1)[0]
+    if resource in INTERNAL_COMMAND_RESOURCES and request.method != "GET":
+        # These commands exist for the Order Service's private HTTP fallback.
+        # A valid shopper token must not turn them into public payment or stock
+        # mutation APIs. Read endpoints remain available for the admin console;
+        # the owning services enforce the admin role on those reads.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "route not found")
+
     # Keyed by user, not IP: users behind one office NAT don't share a
     # bucket, and one user can't dodge the limit by switching networks (FR-7).
     rate_limit_headers: dict[str, str] = {}
