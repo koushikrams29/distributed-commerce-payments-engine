@@ -30,6 +30,9 @@ class MockPaymentGateway:
         *,
         timeout_resolution: str | None = None,
         latency_seconds: float | None = None,
+        refund_outcome: str | None = None,
+        refund_timeout_resolution: str | None = None,
+        refund_latency_seconds: float | None = None,
     ):
         self.outcome = outcome or config.settings.mock_payment_outcome
         self.timeout_resolution = (
@@ -39,6 +42,16 @@ class MockPaymentGateway:
             config.settings.mock_payment_latency_seconds
             if latency_seconds is None
             else latency_seconds
+        )
+        self.refund_outcome = refund_outcome or config.settings.mock_refund_outcome
+        self.refund_timeout_resolution = (
+            refund_timeout_resolution
+            or config.settings.mock_refund_timeout_resolution
+        )
+        self.refund_latency_seconds = (
+            config.settings.mock_refund_latency_seconds
+            if refund_latency_seconds is None
+            else refund_latency_seconds
         )
 
     def charge(self, amount: Decimal, *, idempotency_key: str) -> GatewayResult:
@@ -66,5 +79,19 @@ class MockPaymentGateway:
         )
         return GatewayResult(status=status, reference=f"mock-{idempotency_key}")
 
-    def refund(self, amount: Decimal) -> None:
+    def refund(self, amount: Decimal, *, idempotency_key: str) -> GatewayResult:
         del amount
+        if self.refund_latency_seconds > 0:
+            time.sleep(self.refund_latency_seconds)
+        if self.refund_outcome == "timeout":
+            raise GatewayTimeoutError("mock refund timed out after submission")
+        return self._result(self.refund_outcome, idempotency_key=idempotency_key)
+
+    def lookup_refund(self, *, idempotency_key: str) -> GatewayResult | None:
+        if self.refund_outcome != "timeout":
+            return self._result(self.refund_outcome, idempotency_key=idempotency_key)
+        if self.refund_timeout_resolution == "unknown":
+            return None
+        return self._result(
+            self.refund_timeout_resolution, idempotency_key=idempotency_key
+        )

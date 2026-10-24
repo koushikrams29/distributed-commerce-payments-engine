@@ -3,7 +3,7 @@ import threading
 
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.events.consumers import _publish_payment_outcome
+from app.events.consumers import _publish_payment_outcome, _publish_refund_outcome
 from app.services.payment_service import PaymentService
 
 logger = logging.getLogger(__name__)
@@ -16,7 +16,10 @@ def _reconcile_once() -> int:
         payments = service.reconcile_unresolved()
         for payment in payments:
             _publish_payment_outcome(service, payment)
-        return len(payments)
+        refunds = service.reconcile_refunds()
+        for attempt in refunds:
+            _publish_refund_outcome(service, attempt)
+        return len(payments) + len(refunds)
     except Exception:
         db.rollback()
         logger.exception("payment reconciliation failed")

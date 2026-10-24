@@ -51,6 +51,7 @@ function payment(status: Payment["status"]): Payment {
     lastError: status === "unknown" ? "provider timeout" : null,
     createdAt: at(2),
     updatedAt: at(2),
+    refund: null,
     ledger: [],
   };
 }

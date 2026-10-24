@@ -8,7 +8,7 @@ from commerce_common.messaging import publish_event, run_consumer
 
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.models import Payment, PaymentStatus
+from app.models import Payment, PaymentStatus, RefundAttempt
 from app.services.payment_service import IdempotencyKeyReusedError, PaymentService
 
 logger = logging.getLogger(__name__)
@@ -58,17 +58,9 @@ def _handle_refund_requested(_routing_key: str, payload: dict[str, Any]) -> None
     order_id = uuid.UUID(payload["order_id"])
     db = SessionLocal()
     try:
-        refunded = PaymentService(db).refund_for_order(order_id)
-        for payment in refunded:
-            publish_event(
-                settings.rabbitmq_url,
-                EventType.PAYMENT_REFUNDED,
-                {
-                    "order_id": str(order_id),
-                    "payment_id": str(payment.id),
-                    "amount": str(payment.amount),
-                },
-            )
+        service = PaymentService(db)
+        for attempt in service.refund_for_order(order_id):
+            _publish_refund_outcome(service, attempt)
     finally:
         db.close()
 
@@ -88,6 +80,22 @@ def _publish_payment_outcome(service: PaymentService, payment: Payment) -> None:
     )
     publish_event(settings.rabbitmq_url, routing_key, event_payload)
     service.mark_outcome_reported(payment.id)
+
+
+def _publish_refund_outcome(
+    service: PaymentService, attempt: RefundAttempt
+) -> None:
+    publish_event(
+        settings.rabbitmq_url,
+        EventType.PAYMENT_REFUNDED,
+        {
+            "order_id": str(attempt.payment.order_id),
+            "payment_id": str(attempt.payment_id),
+            "refund_id": str(attempt.id),
+            "amount": str(attempt.payment.amount),
+        },
+    )
+    service.mark_refund_reported(attempt.id)
 
 
 def start_payment_event_consumers() -> None:

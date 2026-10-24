@@ -226,6 +226,13 @@ export function PaymentsPage() {
                       {open && (
                         <tr className="payload-row">
                           <td colSpan={7}>
+                            {payment.refund && (
+                              <div className={payment.refund.status === "failed" || payment.refund.status === "unknown" ? "notice notice--warning" : "notice"}>
+                                Refund {titleCase(payment.refund.status)} · key{" "}
+                                <span className="mono">{payment.refund.idempotencyKey}</span>
+                                {payment.refund.lastError ? ` · ${payment.refund.lastError}` : ""}
+                              </div>
+                            )}
                             {payment.ledger.length === 0 ? (
                               <div>
                                 <p className="muted small">

@@ -17,6 +17,11 @@ class Settings(ObservabilitySettings):
         "unknown"
     )
     mock_payment_latency_seconds: float = 0.0
+    mock_refund_outcome: Literal["success", "failure", "timeout"] = "success"
+    mock_refund_timeout_resolution: Literal["success", "failure", "unknown"] = (
+        "unknown"
+    )
+    mock_refund_latency_seconds: float = 0.0
     payment_reconcile_enabled: bool = True
     payment_reconcile_after_seconds: int = 30
     payment_reconcile_poll_interval_seconds: int = 10

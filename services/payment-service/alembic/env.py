@@ -5,7 +5,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.core.config import settings
 from app.core.db import Base
-from app.models import LedgerEntry, Payment  # noqa: F401
+from app.models import LedgerEntry, Payment, RefundAttempt  # noqa: F401
 
 config = context.config
 

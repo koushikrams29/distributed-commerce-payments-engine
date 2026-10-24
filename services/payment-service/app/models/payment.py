@@ -32,6 +32,13 @@ class LedgerDirection(str, Enum):
     CREDIT = "credit"
 
 
+class RefundStatus(str, Enum):
+    PENDING = "pending"
+    UNKNOWN = "unknown"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 class Payment(Base):
     __tablename__ = "payments"
     __table_args__ = (
@@ -73,6 +80,51 @@ class Payment(Base):
     ledger_entries: Mapped[list["LedgerEntry"]] = relationship(
         back_populates="payment"
     )
+    refund_attempt: Mapped["RefundAttempt | None"] = relationship(
+        back_populates="payment", uselist=False
+    )
+
+
+class RefundAttempt(Base):
+    __tablename__ = "refund_attempts"
+    __table_args__ = (
+        UniqueConstraint("payment_id", name="uq_refund_attempts_payment_id"),
+        UniqueConstraint("idempotency_key", name="uq_refund_attempts_idempotency_key"),
+        CheckConstraint(
+            "status IN ('pending', 'unknown', 'succeeded', 'failed')",
+            name="ck_refund_attempts_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    payment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("payments.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RefundStatus.PENDING.value, index=True
+    )
+    gateway_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    outcome_reported_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    payment: Mapped[Payment] = relationship(back_populates="refund_attempt")
 
 
 class LedgerEntry(Base):

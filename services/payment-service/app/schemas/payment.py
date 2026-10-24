@@ -20,6 +20,18 @@ class LedgerEntryRead(BaseModel):
     created_at: datetime
 
 
+class RefundAttemptRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: str
+    idempotency_key: str
+    gateway_reference: str | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class PaymentRead(BaseModel):
     payment_id: uuid.UUID
     order_id: uuid.UUID
@@ -30,6 +42,7 @@ class PaymentRead(BaseModel):
     last_error: str | None
     created_at: datetime
     updated_at: datetime
+    refund: RefundAttemptRead | None
     ledger_entries: list[LedgerEntryRead]
 
     @classmethod
@@ -44,6 +57,7 @@ class PaymentRead(BaseModel):
             last_error=payment.last_error,
             created_at=payment.created_at,
             updated_at=payment.updated_at,
+            refund=payment.refund_attempt,
             ledger_entries=sorted(
                 payment.ledger_entries, key=lambda entry: entry.created_at
             ),

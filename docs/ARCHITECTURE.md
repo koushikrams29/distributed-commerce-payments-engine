@@ -45,7 +45,7 @@ Order, Inventory, and Payment have genuinely different consistency requirements:
 | Gateway | AuthN/AuthZ (JWT+OAuth2), rate limiting, request routing, WebSocket hub for the dashboard | `users`, `refresh_tokens` | Yes — sole public entry point |
 | Order Service | Order lifecycle state machine, saga orchestration | `orders`, `order_items`, `outbox` | Via Gateway only |
 | Inventory Service | Stock levels, reservation, release-on-failure | `products`, `stock_reservations` | Via Gateway only |
-| Payment Service | Idempotent mocked charge processing, ledger | `payments`, `ledger_entries` | Via Gateway only |
+| Payment Service | Idempotent mocked charge/refund processing, ledger | `payments`, `refund_attempts`, `ledger_entries` | Via Gateway only |
 | Notification Service | Consumes events, logs (fake) email/SMS | `notifications` | No (consumer-only) |
 | Recommendation Service | Rules-based co-purchase tracking off completed orders | `co_purchase_counts` | Via Gateway only (read endpoint) |
 
@@ -109,6 +109,18 @@ payments
   created_at        TIMESTAMPTZ
   updated_at        TIMESTAMPTZ
   -- unique index: (idempotency_key) — enforces FR-3 at the DB level, not just app logic
+
+refund_attempts
+  id                  UUID PK
+  payment_id          UUID FK -> payments.id    -- one attempt per payment
+  idempotency_key     VARCHAR                    -- durable provider key
+  status              VARCHAR(20)               -- pending | unknown | succeeded | failed
+  gateway_reference   VARCHAR
+  last_error          VARCHAR
+  outcome_reported_at TIMESTAMPTZ                -- null until payment.refunded is published
+  created_at          TIMESTAMPTZ
+  updated_at          TIMESTAMPTZ
+  -- unique indexes: (payment_id), (idempotency_key)
 
 ledger_entries
   id              UUID PK
@@ -226,9 +238,9 @@ With `USE_EVENT_BUS=true`, reserve, commit and release run via RabbitMQ events; 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
 | POST | `/charges` | private authenticated fallback | `{order_id, amount, idempotency_key}` | `201` on first charge; `200` when the same charge is replayed; `409` when the key belongs to a different operation. The public Gateway does not expose this command. |
-| GET | `/payments` | admin | query: `status`, `cursor`, `limit` (1–100) | cursor-paginated charges with their ledger entries, newest first |
+| GET | `/payments` | admin | query: `status`, `cursor`, `limit` (1–100) | cursor-paginated charges with their ledger entries and refund attempt, newest first |
 | GET | `/payments/summary` | admin | — | `{counts: {status: n}, total, captured_amount, refunded_amount, net_amount, generated_at}` — money totals come from the ledger, not the payment rows |
-| GET | `/payments/{order_id}` | admin | — | `{payment_id, status, amount, ledger_entries[]}` |
+| GET | `/payments/{order_id}` | admin | — | `{payment_id, status, amount, refund, ledger_entries[]}` |
 
 With `USE_EVENT_BUS=true`, Order Service writes `order.created` and `charge.requested` to the outbox (same DB transaction), a relay publishes to RabbitMQ, and Inventory/Payment consumers handle reserve/charge. Set `USE_EVENT_BUS=false` to fall back to HTTP `BackgroundTasks` (used in CI).
 
@@ -245,7 +257,7 @@ and the confirmed saga reply produces a harmless duplicate rather than a
 stranded order. Shared publishers enable RabbitMQ publisher confirms and
 mandatory routing before marking an outbox row or payment outcome as reported.
 
-If `payment.succeeded` arrives for an order that is already `cancelled` (the reconciler gave up first and released the stock), Order Service emits `refund.requested`; Payment Service marks the payment `refunded`, writes a `credit` ledger entry and emits `payment.refunded`. Refunds lock the payment rows, so a redelivered request cannot credit twice.
+If `payment.succeeded` arrives for an order that is already `cancelled` (the reconciler gave up first and released the stock), Order Service emits `refund.requested`. Payment Service first commits a unique `refund_attempts` row, then calls the provider with its durable `refund-<payment_id>` idempotency key. A timeout becomes `unknown`; redelivery never submits another refund, and the reconciler resolves it only through provider lookup. A confirmed success atomically marks the payment `refunded` and writes the single `credit` ledger entry. Successful attempts remain publishable until `outcome_reported_at` is set, so a crash cannot strand the `payment.refunded` event.
 
 A background **reconciler** (FR-5) moves every order toward a terminal status:
 
@@ -292,7 +304,7 @@ Consumes `payment.succeeded` (with `items[]` in the payload) and increments pair
 | `inventory.committed` | Inventory Service | Order Service | `order_id, committed_count` |
 | `order.fulfilled` | Order Service | Notification Service | `order_id, user_id, total_amount` |
 | `refund.requested` | Order Service | Payment Service | `order_id` |
-| `payment.refunded` | Payment Service | — (audit) | `order_id, payment_id, amount` |
+| `payment.refunded` | Payment Service | — (audit) | `order_id, payment_id, refund_id, amount` |
 | `order.status_changed` | Order Service | Gateway (dashboard) | `order_id, user_id, status, previous_status, total_amount, occurred_at` — one per transition, including creation (`previous_status: null`) |
 
 The Gateway's dashboard relay consumes every event above (`#`), not just `order.status_changed`, to show the full saga in the live feed. `order.status_changed` exists so the dashboard never has to infer an order's status from the saga's internal events.
@@ -678,7 +690,7 @@ Out of scope for v1 (see PRD non-goals), but documented because this is exactly 
 | Dashboard nginx resolves the Gateway through a variable and the container's resolver | A literal `proxy_pass` host is resolved once at startup; a restarted Gateway comes back with a new IP and nginx would keep sending traffic to the old one | ✅ Decided |
 | Prometheus targets from a file selected by the Compose file | The same scrape config serves services on the host and services in containers; the overlay replaces one mounted file instead of maintaining a second config | ✅ Decided |
 | End-to-end smoke test in CI | Unit and integration tests run outside the images, so a broken Dockerfile, migration job, Compose variable or proxy rule would otherwise reach `main` unnoticed | ✅ Decided |
-| Mocked payment gateway interface shape | `charge(amount, idempotency_key) -> result`, `lookup(idempotency_key) -> result or unknown`, `refund(amount)` | ✅ Decided |
+| Mocked payment gateway interface shape | Charges and refunds each accept an idempotency key and expose a lookup operation for ambiguous outcomes | ✅ Decided |
 | Ambiguous gateway outcomes are queried, never recharged | The payment/idempotency row commits before gateway I/O. Timeout becomes `unknown`; reconciliation uses provider lookup so a retry cannot create a second financial effect | ✅ Decided |
 | No distributed lock (Redlock) around charges | The unique constraint on `idempotency_key` already serialises concurrent charges inside the payment transaction; a Redis lock would add a second system to the money path without strengthening that guarantee, and a lock that expires mid-charge would weaken it | ✅ Decided |
 | Payment key derived from the order (`order-<order_id>`), not the shopper's key | Shopper keys are unique per shopper, Payment keys globally; forwarding the shopper's key would let shopper B's order replay shopper A's charge and be marked paid without paying | ✅ Decided |

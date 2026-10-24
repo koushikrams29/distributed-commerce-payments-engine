@@ -50,6 +50,7 @@ const payment: Payment = {
   lastError: null,
   createdAt: at(2),
   updatedAt: at(2),
+  refund: null,
   ledger: [{ id: "l1", direction: "debit", amount: 40, createdAt: at(2.5) }],
 };
 

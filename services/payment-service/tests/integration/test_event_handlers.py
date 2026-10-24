@@ -154,12 +154,12 @@ def test_refund_request_refunds_once_and_reports_each_refund(
 
     [payment] = _payments(session_factory, order_id)
     assert payment.status == PaymentStatus.REFUNDED.value
-    assert published == [
-        (
-            EventType.PAYMENT_REFUNDED,
-            {"order_id": str(order_id), "payment_id": str(payment.id), "amount": "25.00"},
-        )
-    ]
+    [(routing_key, payload)] = published
+    assert routing_key == EventType.PAYMENT_REFUNDED
+    assert payload["order_id"] == str(order_id)
+    assert payload["payment_id"] == str(payment.id)
+    assert payload["amount"] == "25.00"
+    assert uuid.UUID(payload["refund_id"])
 
 
 def test_unknown_events_are_ignored(published: Published) -> None:

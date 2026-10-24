@@ -20,7 +20,14 @@ from app.gateway.mock import (
     GatewayTimeoutError,
     MockPaymentGateway,
 )
-from app.models import LedgerDirection, LedgerEntry, Payment, PaymentStatus
+from app.models import (
+    LedgerDirection,
+    LedgerEntry,
+    Payment,
+    PaymentStatus,
+    RefundAttempt,
+    RefundStatus,
+)
 from app.repositories.payment_repository import PaymentRepository
 from app.schemas.payment import PaymentListResponse, PaymentRead, PaymentSummary
 
@@ -148,29 +155,132 @@ class PaymentService:
         PAYMENT_REPLAYS.inc()
         return existing
 
-    def refund_for_order(self, order_id: uuid.UUID) -> list[Payment]:
-        """Refund every successful charge for an order; returns the ones refunded now.
-
-        Rows are locked so two deliveries of the same refund request cannot
-        both see `succeeded` and credit the customer twice.
-        """
-        refunded: list[Payment] = []
+    def refund_for_order(self, order_id: uuid.UUID) -> list[RefundAttempt]:
+        """Submit at most one durable refund operation for each payment."""
+        refunded: list[RefundAttempt] = []
         for payment in self.repository.list_for_order_for_update(order_id):
             if payment.status != PaymentStatus.SUCCEEDED.value:
                 continue
-            self.gateway.refund(payment.amount)
-            payment.status = PaymentStatus.REFUNDED.value
-            self.repository.add_ledger_entry(
-                LedgerEntry(
-                    payment_id=payment.id,
-                    direction=LedgerDirection.CREDIT.value,
-                    amount=payment.amount,
-                )
+            if self.repository.get_refund_for_payment(payment.id) is not None:
+                continue
+            attempt = RefundAttempt(
+                payment_id=payment.id,
+                idempotency_key=f"refund-{payment.id}",
+                status=RefundStatus.PENDING.value,
             )
-            refunded.append(payment)
-        self.db.commit()
-        PAYMENT_REFUNDS.inc(len(refunded))
+            try:
+                self.repository.add_refund_attempt(attempt)
+                # The durable idempotency claim must exist before provider I/O.
+                self.db.commit()
+            except IntegrityError:
+                self.db.rollback()
+                continue
+            self.db.refresh(attempt)
+            try:
+                result = self.gateway.refund(
+                    payment.amount, idempotency_key=attempt.idempotency_key
+                )
+            except GatewayTimeoutError as exc:
+                self._set_refund_unknown(attempt.id, error=str(exc))
+                continue
+            attempt = self._apply_refund_result(attempt.id, result)
+            if attempt.status == RefundStatus.SUCCEEDED.value:
+                refunded.append(attempt)
         return refunded
+
+    def _set_refund_unknown(
+        self, attempt_id: uuid.UUID, *, error: str
+    ) -> RefundAttempt:
+        attempt = self.repository.get_refund_by_id_for_update(attempt_id)
+        if attempt is None:
+            raise RuntimeError(f"refund attempt disappeared: {attempt_id}")
+        if attempt.status == RefundStatus.PENDING.value:
+            attempt.status = RefundStatus.UNKNOWN.value
+            attempt.last_error = error[:500]
+            self.db.commit()
+            self.db.refresh(attempt)
+        return attempt
+
+    def _apply_refund_result(
+        self, attempt_id: uuid.UUID, result: GatewayResult
+    ) -> RefundAttempt:
+        attempt = self.repository.get_refund_by_id_for_update(attempt_id)
+        if attempt is None:
+            raise RuntimeError(f"refund attempt disappeared: {attempt_id}")
+        if attempt.status not in {
+            RefundStatus.PENDING.value,
+            RefundStatus.UNKNOWN.value,
+        }:
+            return attempt
+
+        attempt.gateway_reference = result.reference
+        attempt.last_error = None
+        credited = False
+        if result.status == GatewayStatus.SUCCEEDED:
+            attempt.status = RefundStatus.SUCCEEDED.value
+            attempt.payment.status = PaymentStatus.REFUNDED.value
+            if not any(
+                entry.direction == LedgerDirection.CREDIT.value
+                for entry in attempt.payment.ledger_entries
+            ):
+                self.repository.add_ledger_entry(
+                    LedgerEntry(
+                        payment_id=attempt.payment_id,
+                        direction=LedgerDirection.CREDIT.value,
+                        amount=attempt.payment.amount,
+                    )
+                )
+                credited = True
+        else:
+            attempt.status = RefundStatus.FAILED.value
+        self.db.commit()
+        if credited:
+            PAYMENT_REFUNDS.inc()
+        self.db.refresh(attempt)
+        return attempt
+
+    def reconcile_refunds(self) -> list[RefundAttempt]:
+        """Resolve stale refunds by lookup and return unreported successes."""
+        cutoff = datetime.now(UTC) - timedelta(
+            seconds=settings.payment_reconcile_after_seconds
+        )
+        reportable: dict[uuid.UUID, RefundAttempt] = {}
+        for attempt in self.repository.list_reconcilable_refunds(
+            unresolved_before=cutoff
+        ):
+            if attempt.status in {
+                RefundStatus.PENDING.value,
+                RefundStatus.UNKNOWN.value,
+            }:
+                result = self.gateway.lookup_refund(
+                    idempotency_key=attempt.idempotency_key
+                )
+                if result is None:
+                    if attempt.status == RefundStatus.PENDING.value:
+                        self._set_refund_unknown(
+                            attempt.id,
+                            error="provider lookup could not determine refund outcome",
+                        )
+                    continue
+                attempt = self._apply_refund_result(attempt.id, result)
+            if (
+                attempt.status == RefundStatus.SUCCEEDED.value
+                and attempt.outcome_reported_at is None
+            ):
+                reportable[attempt.id] = attempt
+        return list(reportable.values())
+
+    def mark_refund_reported(self, attempt_id: uuid.UUID) -> None:
+        attempt = self.repository.get_refund_by_id_for_update(attempt_id)
+        if (
+            attempt is None
+            or attempt.status != RefundStatus.SUCCEEDED.value
+            or attempt.outcome_reported_at is not None
+        ):
+            self.db.rollback()
+            return
+        attempt.outcome_reported_at = datetime.now(UTC)
+        self.db.commit()
 
     def reconcile_unresolved(self) -> list[Payment]:
         """Resolve stale attempts by provider lookup, never by charging again.
