@@ -33,7 +33,7 @@ from app.schemas.order import (
     OrderRead,
     OrderSummary,
 )
-from app.services.order_service import OrderService
+from app.services.order_service import IdempotencyKeyReusedError, OrderService
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -78,6 +78,11 @@ def create_order(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="inventory service unavailable",
+        ) from exc
+    except IdempotencyKeyReusedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
         ) from exc
 
     if not created:
