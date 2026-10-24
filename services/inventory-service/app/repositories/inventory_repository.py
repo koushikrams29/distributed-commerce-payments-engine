@@ -34,6 +34,10 @@ class ProductRepository:
         stmt = select(Product).where(Product.name == name)
         return self.db.execute(stmt).scalar_one_or_none()
 
+    def get_by_seed_key(self, seed_key: str) -> Product | None:
+        stmt = select(Product).where(Product.seed_key == seed_key)
+        return self.db.execute(stmt).scalar_one_or_none()
+
 
 class ReservationRepository:
     def __init__(self, db: Session):

@@ -86,15 +86,16 @@ outbox
 products
   id              UUID PK
   name            VARCHAR
+  seed_key        VARCHAR NULL UNIQUE       -- stable startup-seed identity, not a display-name constraint
   price           NUMERIC(12,2)
-  stock_qty       INTEGER
+  stock_qty       INTEGER                   -- CHECK >= 0
 
 stock_reservations
   id              UUID PK
   order_id        UUID                      -- NO FK: orders is owned by Order Service
   product_id      UUID FK -> products.id    -- real FK: same database
-  qty             INTEGER
-  status          VARCHAR(20)               -- held | released | committed
+  qty             INTEGER                   -- CHECK > 0
+  status          VARCHAR(20)               -- held | released | committed (DB CHECK)
   expires_at      TIMESTAMPTZ
 
 payments
