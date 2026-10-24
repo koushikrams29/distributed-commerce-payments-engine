@@ -3,10 +3,13 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.repositories.inventory_repository import ProductRepository
 from app.schemas.inventory import ReserveItem
 from app.services.inventory_service import (
     InsufficientStockError,
@@ -254,3 +257,78 @@ def test_ensure_product_seeds_once_by_name(session_factory: sessionmaker[Session
 
     assert again.id == first.id
     assert (again.price, again.stock_qty) == (Decimal("25.00"), 10)
+
+
+def test_concurrent_product_seeding_creates_one_row(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    barrier = threading.Barrier(2)
+    original = ProductRepository.get_by_seed_key
+
+    def synchronize_initial_lookup(
+        repository: ProductRepository, seed_key: str
+    ):
+        product = original(repository, seed_key)
+        if product is None:
+            barrier.wait(timeout=10)
+        return product
+
+    monkeypatch.setattr(ProductRepository, "get_by_seed_key", synchronize_initial_lookup)
+
+    def seed() -> uuid.UUID:
+        with session_factory() as db:
+            return InventoryService(db).ensure_product(
+                name="Concurrent Seed", price=Decimal("20.00"), stock_qty=5
+            ).id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ids = [future.result() for future in [pool.submit(seed), pool.submit(seed)]]
+
+    assert ids[0] == ids[1]
+
+
+@pytest.mark.parametrize(
+    ("price", "stock_qty"),
+    [(Decimal("0.00"), 1), (Decimal("-1.00"), 1), (Decimal("1.00"), -1)],
+)
+def test_database_rejects_invalid_product_quantities(
+    engine: Engine, price: Decimal, stock_qty: int
+) -> None:
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO products (id, name, price, stock_qty) "
+                "VALUES (:id, :name, :price, :stock_qty)"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "name": f"Invalid {uuid.uuid4()}",
+                "price": price,
+                "stock_qty": stock_qty,
+            },
+        )
+
+
+@pytest.mark.parametrize(("qty", "status"), [(0, "held"), (-1, "held"), (1, "invalid")])
+def test_database_rejects_invalid_reservations(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    qty: int,
+    status: str,
+) -> None:
+    product = seed_product(session_factory)
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO stock_reservations "
+                "(id, order_id, product_id, qty, status, expires_at) "
+                "VALUES (:id, :order_id, :product_id, :qty, :status, now())"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "order_id": uuid.uuid4(),
+                "product_id": product.id,
+                "qty": qty,
+                "status": status,
+            },
+        )

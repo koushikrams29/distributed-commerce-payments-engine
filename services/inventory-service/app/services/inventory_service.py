@@ -2,6 +2,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -208,11 +209,23 @@ class InventoryService:
     def ensure_product(
         self, *, name: str, price: Decimal, stock_qty: int
     ) -> Product:
-        existing = self.products.get_by_name(name)
+        seed_key = name
+        existing = self.products.get_by_seed_key(seed_key)
         if existing is not None:
             return existing
-        product = Product(name=name, price=price, stock_qty=stock_qty)
-        self.products.add(product)
-        self.db.commit()
+        product = Product(
+            name=name, seed_key=seed_key, price=price, stock_qty=stock_qty
+        )
+        try:
+            self.products.add(product)
+            self.db.commit()
+        except IntegrityError:
+            # Another replica may have seeded the same product after our
+            # lookup. The database key is the concurrency boundary.
+            self.db.rollback()
+            existing = self.products.get_by_seed_key(seed_key)
+            if existing is None:
+                raise
+            return existing
         self.db.refresh(product)
         return product
