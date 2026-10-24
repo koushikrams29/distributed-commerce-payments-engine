@@ -286,6 +286,15 @@ interface PaymentDto {
   last_error: string | null;
   created_at: string;
   updated_at: string;
+  refund: {
+    id: string;
+    status: "pending" | "unknown" | "succeeded" | "failed";
+    idempotency_key: string;
+    gateway_reference: string | null;
+    last_error: string | null;
+    created_at: string;
+    updated_at: string;
+  } | null;
   ledger_entries: { id: string; direction: string; amount: string; created_at: string }[];
 }
 
@@ -300,6 +309,17 @@ function toPayment(dto: PaymentDto): Payment {
     lastError: dto.last_error,
     createdAt: dto.created_at,
     updatedAt: dto.updated_at,
+    refund: dto.refund
+      ? {
+          id: dto.refund.id,
+          status: dto.refund.status,
+          idempotencyKey: dto.refund.idempotency_key,
+          gatewayReference: dto.refund.gateway_reference,
+          lastError: dto.refund.last_error,
+          createdAt: dto.refund.created_at,
+          updatedAt: dto.refund.updated_at,
+        }
+      : null,
     ledger: dto.ledger_entries.map(
       (entry): LedgerEntry => ({
         id: entry.id,

@@ -5,7 +5,7 @@ from decimal import Decimal
 from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import LedgerEntry, Payment
+from app.models import LedgerEntry, Payment, RefundAttempt
 
 
 class PaymentRepository:
@@ -22,11 +22,65 @@ class PaymentRepository:
         self.db.flush()
         return entry
 
+    def add_refund_attempt(self, attempt: RefundAttempt) -> RefundAttempt:
+        self.db.add(attempt)
+        self.db.flush()
+        return attempt
+
+    def get_refund_for_payment(self, payment_id: uuid.UUID) -> RefundAttempt | None:
+        stmt = (
+            select(RefundAttempt)
+            .where(RefundAttempt.payment_id == payment_id)
+            .options(selectinload(RefundAttempt.payment))
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def get_refund_by_id_for_update(
+        self, attempt_id: uuid.UUID
+    ) -> RefundAttempt | None:
+        stmt = (
+            select(RefundAttempt)
+            .where(RefundAttempt.id == attempt_id)
+            .with_for_update()
+            .options(
+                selectinload(RefundAttempt.payment).selectinload(
+                    Payment.ledger_entries
+                )
+            )
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def list_reconcilable_refunds(
+        self, *, unresolved_before: datetime, limit: int = 100
+    ) -> list[RefundAttempt]:
+        stmt = (
+            select(RefundAttempt)
+            .where(
+                or_(
+                    and_(
+                        RefundAttempt.status.in_(["pending", "unknown"]),
+                        RefundAttempt.updated_at < unresolved_before,
+                    ),
+                    and_(
+                        RefundAttempt.status == "succeeded",
+                        RefundAttempt.outcome_reported_at.is_(None),
+                    ),
+                )
+            )
+            .options(selectinload(RefundAttempt.payment))
+            .order_by(RefundAttempt.updated_at.asc())
+            .limit(limit)
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
     def get_by_idempotency_key(self, idempotency_key: str) -> Payment | None:
         stmt = (
             select(Payment)
             .where(Payment.idempotency_key == idempotency_key)
-            .options(selectinload(Payment.ledger_entries))
+            .options(
+                selectinload(Payment.ledger_entries),
+                selectinload(Payment.refund_attempt),
+            )
         )
         return self.db.execute(stmt).scalar_one_or_none()
 
@@ -35,7 +89,10 @@ class PaymentRepository:
             select(Payment)
             .where(Payment.id == payment_id)
             .with_for_update()
-            .options(selectinload(Payment.ledger_entries))
+            .options(
+                selectinload(Payment.ledger_entries),
+                selectinload(Payment.refund_attempt),
+            )
         )
         return self.db.execute(stmt).scalar_one_or_none()
 
@@ -66,7 +123,10 @@ class PaymentRepository:
             select(Payment)
             .where(Payment.order_id == order_id)
             .with_for_update()
-            .options(selectinload(Payment.ledger_entries))
+            .options(
+                selectinload(Payment.ledger_entries),
+                selectinload(Payment.refund_attempt),
+            )
         )
         return list(self.db.execute(stmt).scalars().all())
 
@@ -80,7 +140,10 @@ class PaymentRepository:
         """Newest first. Fetch limit+1 so the service can detect a next page."""
         stmt = (
             select(Payment)
-            .options(selectinload(Payment.ledger_entries))
+            .options(
+                selectinload(Payment.ledger_entries),
+                selectinload(Payment.refund_attempt),
+            )
             .order_by(Payment.created_at.desc(), Payment.id.desc())
             .limit(limit + 1)
         )
@@ -107,7 +170,10 @@ class PaymentRepository:
         stmt = (
             select(Payment)
             .where(Payment.order_id == order_id)
-            .options(selectinload(Payment.ledger_entries))
+            .options(
+                selectinload(Payment.ledger_entries),
+                selectinload(Payment.refund_attempt),
+            )
             .order_by(Payment.created_at.desc())
             .limit(1)
         )

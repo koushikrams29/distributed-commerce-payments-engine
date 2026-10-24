@@ -94,6 +94,15 @@ export interface Payment {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  refund: {
+    id: string;
+    status: "pending" | "unknown" | "succeeded" | "failed";
+    idempotencyKey: string;
+    gatewayReference: string | null;
+    lastError: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
   ledger: LedgerEntry[];
 }
 
