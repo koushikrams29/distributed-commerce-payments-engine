@@ -7,7 +7,7 @@ from decimal import Decimal
 from sqlalchemy import Engine, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.gateway.mock import MockPaymentGateway
+from app.gateway.mock import MockPaymentGateway, RefundLookup
 from app.models import Payment, RefundAttempt, RefundStatus
 from app.services.payment_service import PaymentService
 
@@ -28,7 +28,7 @@ class CountingRefundGateway(MockPaymentGateway):
         self.refund_calls += 1
         return super().refund(amount, idempotency_key=idempotency_key)
 
-    def lookup_refund(self, *, idempotency_key: str):
+    def lookup_refund(self, *, idempotency_key: str) -> RefundLookup:
         self.lookup_refund_calls += 1
         return super().lookup_refund(idempotency_key=idempotency_key)
 
@@ -206,3 +206,43 @@ def test_definitive_refund_failure_keeps_payment_captured(
     assert attempt.status == RefundStatus.FAILED.value
     assert _status(engine, order_id) == "succeeded"
     assert [direction for direction, _ in _ledger(engine, order_id)] == ["debit"]
+
+
+def test_pending_refund_never_submitted_is_resent_on_reconcile(
+    session_factory: sessionmaker[Session], engine: Engine
+) -> None:
+    """Crash after committing the attempt and before provider I/O.
+
+    Lookup must return not_found (not a fake success). Reconcile then submits
+    once with the same idempotency key and credits the ledger exactly once.
+    """
+    order_id = _charge(session_factory)
+    gateway = CountingRefundGateway("success")
+
+    with session_factory() as db:
+        payment = db.scalar(select(Payment).where(Payment.order_id == order_id))
+        assert payment is not None
+        attempt = RefundAttempt(
+            payment_id=payment.id,
+            idempotency_key=f"refund-{payment.id}",
+            status=RefundStatus.PENDING.value,
+        )
+        db.add(attempt)
+        db.commit()
+        db.execute(
+            update(RefundAttempt)
+            .where(RefundAttempt.id == attempt.id)
+            .values(updated_at=datetime.now(UTC) - timedelta(minutes=5))
+        )
+        db.commit()
+
+        service = PaymentService(db, gateway=gateway)
+        [resolved] = service.reconcile_refunds()
+        service.mark_refund_reported(resolved.id)
+        assert service.reconcile_refunds() == []
+
+    assert resolved.status == RefundStatus.SUCCEEDED.value
+    assert gateway.lookup_refund_calls == 1
+    assert gateway.refund_calls == 1
+    assert _status(engine, order_id) == "refunded"
+    assert [direction for direction, _ in _ledger(engine, order_id)].count("credit") == 1

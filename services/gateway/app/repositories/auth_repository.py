@@ -33,10 +33,16 @@ class RefreshTokenRepository:
         self.db.flush()
         return token
 
-    def get_valid_by_raw_token(self, raw_token: str) -> RefreshToken | None:
+    def get_valid_by_raw_token(
+        self, raw_token: str, *, for_update: bool = False
+    ) -> RefreshToken | None:
         token_hash = hash_refresh_token(raw_token)
         stmt = select(RefreshToken).where(
             RefreshToken.token_hash == token_hash,
             RefreshToken.revoked_at.is_(None),
         )
+        if for_update:
+            # Serialises rotation: a concurrent refresher waits, then rechecks
+            # revoked_at and gets None once the winner has committed.
+            stmt = stmt.with_for_update()
         return self.db.execute(stmt).scalar_one_or_none()
