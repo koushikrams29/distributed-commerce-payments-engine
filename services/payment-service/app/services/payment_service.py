@@ -19,6 +19,7 @@ from app.gateway.mock import (
     GatewayStatus,
     GatewayTimeoutError,
     MockPaymentGateway,
+    RefundLookupKind,
 )
 from app.models import (
     LedgerDirection,
@@ -240,7 +241,14 @@ class PaymentService:
         return attempt
 
     def reconcile_refunds(self) -> list[RefundAttempt]:
-        """Resolve stale refunds by lookup and return unreported successes."""
+        """Resolve stale refunds and return unreported successes.
+
+        Lookup distinguishes three provider answers:
+        - found: apply the stored outcome (never submit again)
+        - unknown: keep looking; mark pending → unknown so operators see ambiguity
+        - not_found: the durable attempt never reached the provider (crash after
+          commit / before refund()). Safe to submit with the same idempotency key.
+        """
         cutoff = datetime.now(UTC) - timedelta(
             seconds=settings.payment_reconcile_after_seconds
         )
@@ -252,17 +260,29 @@ class PaymentService:
                 RefundStatus.PENDING.value,
                 RefundStatus.UNKNOWN.value,
             }:
-                result = self.gateway.lookup_refund(
+                lookup = self.gateway.lookup_refund(
                     idempotency_key=attempt.idempotency_key
                 )
-                if result is None:
+                if lookup.kind == RefundLookupKind.UNKNOWN:
                     if attempt.status == RefundStatus.PENDING.value:
                         self._set_refund_unknown(
                             attempt.id,
                             error="provider lookup could not determine refund outcome",
                         )
                     continue
-                attempt = self._apply_refund_result(attempt.id, result)
+                if lookup.kind == RefundLookupKind.NOT_FOUND:
+                    try:
+                        result = self.gateway.refund(
+                            attempt.payment.amount,
+                            idempotency_key=attempt.idempotency_key,
+                        )
+                    except GatewayTimeoutError as exc:
+                        self._set_refund_unknown(attempt.id, error=str(exc))
+                        continue
+                    attempt = self._apply_refund_result(attempt.id, result)
+                else:
+                    assert lookup.result is not None
+                    attempt = self._apply_refund_result(attempt.id, lookup.result)
             if (
                 attempt.status == RefundStatus.SUCCEEDED.value
                 and attempt.outcome_reported_at is None

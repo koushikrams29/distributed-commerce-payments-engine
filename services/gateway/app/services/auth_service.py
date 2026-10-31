@@ -29,7 +29,9 @@ class AuthService:
         return self._issue_token_pair(user)
 
     def refresh(self, raw_refresh_token: str) -> TokenPair:
-        stored = self.refresh_tokens.get_valid_by_raw_token(raw_refresh_token)
+        stored = self.refresh_tokens.get_valid_by_raw_token(
+            raw_refresh_token, for_update=True
+        )
         if stored is None:
             raise AuthError("invalid refresh token")
 
@@ -39,7 +41,8 @@ class AuthService:
             self.db.commit()
             raise AuthError("invalid refresh token")
 
-        # Rotation: this token can never be used again.
+        # Rotation: this token can never be used again. The row lock above makes
+        # concurrent reuse wait and then fail instead of minting two descendants.
         stored.revoked_at = now
         user = self.users.get_by_id(stored.user_id)
         if user is None:

@@ -1,12 +1,15 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 from commerce_common.auth import Role, verify_password
 from fastapi.testclient import TestClient
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import RefreshToken, User, hash_refresh_token
-from app.services.auth_service import AuthService
+from app.schemas.auth import TokenPair
+from app.services.auth_service import AuthError, AuthService
 
 
 def test_expired_refresh_token_is_rejected_and_revoked(
@@ -57,3 +60,52 @@ def test_ensure_user_creates_once_and_keeps_the_first_password(
         assert users[0].email == "admin@example.com"
         assert users[0].role == Role.ADMIN.value
         assert verify_password("first-pass", users[0].password_hash)
+
+
+def test_concurrent_refresh_rotates_only_once(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Two overlapping refreshes must not mint two live descendant tokens."""
+    with session_factory() as db:
+        AuthService(db).ensure_user(
+            email="shopper@example.com", password="secret-pass", role=Role.SHOPPER
+        )
+        pair = AuthService(db).login("shopper@example.com", "secret-pass")
+
+    barrier = threading.Barrier(2)
+
+    def attempt() -> TokenPair | str:
+        db = session_factory()
+        try:
+            barrier.wait(timeout=10)
+            return AuthService(db).refresh(pair.refresh_token)
+        except AuthError:
+            return "rejected"
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = [future.result() for future in [pool.submit(attempt), pool.submit(attempt)]]
+
+    assert sorted(
+        "ok" if isinstance(item, TokenPair) else item for item in outcomes
+    ) == ["ok", "rejected"]
+    winners = [item for item in outcomes if isinstance(item, TokenPair)]
+    assert len(winners) == 1
+
+    with session_factory() as db:
+        live = db.scalar(
+            select(func.count())
+            .select_from(RefreshToken)
+            .where(RefreshToken.revoked_at.is_(None))
+        )
+        # Original revoked + one new live token from the winner.
+        assert live == 1
+        AuthService(db).refresh(winners[0].refresh_token)
+    with session_factory() as db:
+        try:
+            AuthService(db).refresh(pair.refresh_token)
+            raised = False
+        except AuthError:
+            raised = True
+        assert raised
