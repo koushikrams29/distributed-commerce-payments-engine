@@ -13,7 +13,7 @@ export class NotAdminError extends Error {
 
 export interface SessionApi {
   session: Session | null;
-  signIn: (pair: TokenPair) => void;
+  signIn: (pair: TokenPair, email?: string) => void;
   signOut: () => void;
   /** Swaps the refresh token for a new pair; signs out if that is impossible. */
   refresh: () => Promise<Session | null>;
@@ -39,8 +39,8 @@ export function useSession(): SessionApi {
   }, []);
 
   const signIn = useCallback(
-    (pair: TokenPair) => {
-      const next = sessionFromTokens(pair);
+    (pair: TokenPair, email?: string) => {
+      const next = sessionFromTokens(pair, { emailFallback: email ?? null });
       if (!next) throw new Error("The gateway returned an unreadable token");
       if (!isAdmin(next)) throw new NotAdminError();
       update(next);
@@ -57,7 +57,7 @@ export function useSession(): SessionApi {
 
     inFlight.current = refreshTokens(current.refreshToken)
       .then((pair) => {
-        const next = sessionFromTokens(pair);
+        const next = sessionFromTokens(pair, { emailFallback: current.email });
         update(next && isAdmin(next) ? next : null);
         return sessionRef.current;
       })

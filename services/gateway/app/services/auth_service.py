@@ -74,6 +74,7 @@ class AuthService:
             user_id=user.id,
             role=Role(user.role),
             expires_minutes=settings.access_token_expire_minutes,
+            email=user.email,
         )
         raw_refresh = new_refresh_token()
         self.refresh_tokens.add(

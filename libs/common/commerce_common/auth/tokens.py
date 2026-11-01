@@ -27,8 +27,13 @@ def create_access_token(
     user_id: UUID,
     role: Role,
     expires_minutes: int,
+    email: str | None = None,
 ) -> str:
-    """Sign a short-lived access JWT. Anyone with `secret` can verify it."""
+    """Sign a short-lived access JWT. Anyone with `secret` can verify it.
+
+    `email` is optional display metadata for the console; authorization still
+    uses `sub` and `role` only.
+    """
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
         "sub": str(user_id),
@@ -38,6 +43,8 @@ def create_access_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_minutes),
     }
+    if email:
+        payload["email"] = email
     return jwt.encode(payload, secret, algorithm=ALGORITHM)
 
 
