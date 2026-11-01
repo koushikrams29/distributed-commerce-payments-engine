@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 
 import { ConnectionPill } from "../components/ConnectionPill";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Icon, type IconName } from "../components/ui/Icon";
 import { ToolLink } from "../components/ui/ToolLink";
-import { shortId } from "../lib/format";
+import { sessionDisplayName } from "../lib/auth";
 import { Link, navigate, orderPath, useLocation, useRoute, type Route } from "../lib/router";
 import { isUuid } from "../types";
 import { useLiveData } from "./LiveData";
@@ -110,6 +111,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
   const links = useToolLinks();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const displayName = sessionDisplayName(session);
 
   useEffect(() => setDrawerOpen(false), [pathname]);
 
@@ -189,13 +192,13 @@ export function Shell({ children }: { children: ReactNode }) {
           <OrderLookup />
           <div className="topbar__right">
             <ConnectionPill state={connection} />
-            <span className="topbar__user mono" title={`Signed in as admin ${session.userId}`}>
-              admin · {shortId(session.userId)}
+            <span className="topbar__user" title={`Signed in as ${displayName}`}>
+              {displayName}
             </span>
             <button
               className="icon-button"
               type="button"
-              onClick={api.signOut}
+              onClick={() => setConfirmSignOut(true)}
               aria-label="Sign out"
               title="Sign out"
             >
@@ -226,6 +229,19 @@ export function Shell({ children }: { children: ReactNode }) {
           {children}
         </main>
       </div>
+
+      <ConfirmDialog
+        open={confirmSignOut}
+        title="Sign out?"
+        confirmLabel="Sign out"
+        onConfirm={() => {
+          setConfirmSignOut(false);
+          api.signOut();
+        }}
+        onCancel={() => setConfirmSignOut(false)}
+      >
+        You will need to sign in again to use the operations console.
+      </ConfirmDialog>
     </div>
   );
 }

@@ -5,6 +5,8 @@ export interface Session {
   refreshToken: string;
   userId: string;
   role: string;
+  /** Login email when the token carries it; used only for display. */
+  email: string | null;
   /** Access-token expiry, epoch milliseconds. */
   expiresAt: number;
 }
@@ -13,6 +15,7 @@ interface AccessClaims {
   sub: string;
   role: string;
   exp: number;
+  email?: string;
 }
 
 const STORAGE_KEY = "commerce.dashboard.session";
@@ -36,7 +39,13 @@ export function readAccessClaims(token: string): AccessClaims | null {
       typeof (claims as AccessClaims).role === "string" &&
       typeof (claims as AccessClaims).exp === "number"
     ) {
-      return claims as AccessClaims;
+      const email = (claims as AccessClaims).email;
+      return {
+        sub: (claims as AccessClaims).sub,
+        role: (claims as AccessClaims).role,
+        exp: (claims as AccessClaims).exp,
+        email: typeof email === "string" && email.trim() ? email.trim() : undefined,
+      };
     }
   } catch {
     // Malformed base64 or JSON.
@@ -44,14 +53,19 @@ export function readAccessClaims(token: string): AccessClaims | null {
   return null;
 }
 
-export function sessionFromTokens(pair: TokenPair): Session | null {
+export function sessionFromTokens(
+  pair: TokenPair,
+  options?: { emailFallback?: string | null },
+): Session | null {
   const claims = readAccessClaims(pair.access_token);
   if (!claims) return null;
+  const fallback = options?.emailFallback?.trim() || null;
   return {
     accessToken: pair.access_token,
     refreshToken: pair.refresh_token,
     userId: claims.sub,
     role: claims.role,
+    email: claims.email ?? fallback,
     expiresAt: claims.exp * 1000,
   };
 }
@@ -60,12 +74,35 @@ export function isAdmin(session: Session): boolean {
   return session.role === "admin";
 }
 
+/** Label shown in the top bar — email when known, otherwise the role. */
+export function sessionDisplayName(session: Session): string {
+  if (session.email) return session.email;
+  return session.role === "admin" ? "Administrator" : session.role;
+}
+
 // sessionStorage, not localStorage: the session ends with the tab, which keeps
 // the long-lived refresh token from lingering on shared machines.
 export function loadSession(): Session | null {
   try {
     const raw = sessionStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Session) : null;
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      typeof (parsed as Session).accessToken !== "string" ||
+      typeof (parsed as Session).refreshToken !== "string" ||
+      typeof (parsed as Session).userId !== "string" ||
+      typeof (parsed as Session).role !== "string" ||
+      typeof (parsed as Session).expiresAt !== "number"
+    ) {
+      return null;
+    }
+    const email = (parsed as Session).email;
+    return {
+      ...(parsed as Session),
+      email: typeof email === "string" && email.trim() ? email.trim() : null,
+    };
   } catch {
     return null;
   }

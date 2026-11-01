@@ -56,11 +56,14 @@ def test_access_token_round_trip() -> None:
         user_id=user_id,
         role=Role.ADMIN,
         expires_minutes=5,
+        email="admin@example.com",
     )
     payload = decode_access_token(secret=SECRET, token=token)
     assert payload.user_id == user_id
     assert payload.role == Role.ADMIN
     assert payload.expires_at is not None
+    claims = jwt.decode(token, SECRET, algorithms=["HS256"])
+    assert claims["email"] == "admin@example.com"
 
 
 def test_forged_token_is_rejected() -> None:

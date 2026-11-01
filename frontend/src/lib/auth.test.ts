@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isAdmin, readAccessClaims, sessionFromTokens } from "./auth";
+import { isAdmin, readAccessClaims, sessionDisplayName, sessionFromTokens } from "./auth";
 
 function base64Url(value: object): string {
   return Buffer.from(JSON.stringify(value))
@@ -46,7 +46,37 @@ describe("sessionFromTokens", () => {
       token_type: "bearer",
     });
 
-    expect(session).toMatchObject({ userId: "user-1", role: "shopper", expiresAt: 100_000 });
+    expect(session).toMatchObject({
+      userId: "user-1",
+      role: "shopper",
+      email: null,
+      expiresAt: 100_000,
+    });
     expect(session && isAdmin(session)).toBe(false);
+  });
+
+  it("prefers the email claim and falls back to the login email", () => {
+    const fromClaim = sessionFromTokens({
+      access_token: fakeJwt({
+        sub: "user-1",
+        role: "admin",
+        exp: 100,
+        email: "admin@example.com",
+      }),
+      refresh_token: "refresh",
+      token_type: "bearer",
+    });
+    const fromFallback = sessionFromTokens(
+      {
+        access_token: fakeJwt({ sub: "user-1", role: "admin", exp: 100 }),
+        refresh_token: "refresh",
+        token_type: "bearer",
+      },
+      { emailFallback: "admin@example.com" },
+    );
+
+    expect(fromClaim?.email).toBe("admin@example.com");
+    expect(fromFallback?.email).toBe("admin@example.com");
+    expect(sessionDisplayName(fromClaim!)).toBe("admin@example.com");
   });
 });
